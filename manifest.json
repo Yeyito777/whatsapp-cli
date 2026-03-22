@@ -1,6 +1,14 @@
 {
   "name": "whatsapp",
   "bin": "./bin/whatsapp",
+  "daemon": {
+    "command": "npx tsx lib/daemon.ts",
+    "restart": "on-failure",
+    "env": {
+      "NODE_ENV": "production",
+      "WA_LOG_LEVEL": "info"
+    }
+  },
   "systemHint": "You have access to the user's WhatsApp through the `whatsapp` CLI tool (source at ~/Workspace/Exocortex/external-tools/whatsapp-cli). Run `whatsapp -h` for usage reference.",
   "display": {
     "label": "WhatsApp",

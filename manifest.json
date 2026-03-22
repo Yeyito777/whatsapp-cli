@@ -1,0 +1,9 @@
+{
+  "name": "whatsapp",
+  "bin": "./bin/whatsapp",
+  "systemHint": "You have access to the user's WhatsApp through the `whatsapp` CLI tool (source at ~/Workspace/Exocortex/external-tools/whatsapp-cli). Run `whatsapp -h` for usage reference.",
+  "display": {
+    "label": "WhatsApp",
+    "color": "#25d366"
+  }
+}

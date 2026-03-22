@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# WhatsApp CLI — terminal WhatsApp client for Exocortex.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+TSX="$PROJECT_DIR/node_modules/.bin/tsx"
+
+usage() {
+    cat <<'EOF'
+usage: whatsapp <command> [args]
+
+commands:
+  login        Authenticate with WhatsApp (one-time setup)   (alias: auth)
+  logout       Remove stored credentials
+  daemon       Manage background daemon (start|stop|restart|status|logs)
+
+  context      AI orientation — account, aliases, recent chats  (alias: ctx)
+  alias        Manage aliases (list|set|remove)
+
+  chats        List all chats (sorted by recent)
+  groups       List groups only
+  contacts     List contacts
+  messages     Read messages from a chat        (alias: msgs)
+  search       Search across all messages       (alias: s)
+  info         Group details + participants
+  sync         Force-sync group metadata
+
+  send         Send a message (text, file, or reply)
+  typing       Show/hide typing indicator
+  read         Mark chat as read
+
+flags:
+  --json       JSON output (any command)
+
+target: alias ("Mom"), phone number (1415...), JID, or chat name.
+
+Run 'whatsapp <command> --help' for command-specific usage.
+EOF
+}
+
+# Extract --json global flag so it can precede the command
+json_arg=""
+args=()
+for arg in "$@"; do
+    case "$arg" in
+        --json) json_arg="--json" ;;
+        *) args+=("$arg") ;;
+    esac
+done
+set -- ${args[@]+"${args[@]}"}
+
+if [[ $# -eq 0 ]]; then
+    usage
+    exit 1
+fi
+
+cmd="$1"; shift
+
+case "$cmd" in
+    login|auth)
+        exec "$TSX" "$PROJECT_DIR/lib/auth.ts" "$@" ;;
+    logout)
+        rm -rf "$PROJECT_DIR/config/auth"
+        echo "Logged out. Auth credentials removed." ;;
+    daemon)
+        exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} daemon "$@" ;;
+    chats|groups|contacts|messages|msgs|search|s|send|typing|read|info|context|ctx|alias|sync)
+        exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} "$cmd" "$@" ;;
+    help|--help|-h)
+        usage ;;
+    *)
+        echo "whatsapp: unknown command '$cmd'" >&2
+        echo "Run 'whatsapp --help' for usage." >&2
+        exit 1 ;;
+esac

@@ -208,14 +208,23 @@ async function cmdSearch(args: string[]): Promise<void> {
 async function cmdSend(args: string[]): Promise<void> {
   requireDaemon();
   const target = args[0];
-  if (!target) die('Usage: whatsapp send <name_or_jid> "message"');
+  if (!target) die('Usage: whatsapp send <name_or_jid> "message"\n       whatsapp send <name_or_jid> ["caption" | --caption "caption"] --file <path>');
 
   // --file mode
   const fileIdx = args.indexOf('--file');
   if (fileIdx !== -1) {
     const filePath = args[fileIdx + 1];
     if (!filePath) die('Missing file path after --file');
-    const caption = args.slice(1, fileIdx).join(' ') || undefined;
+
+    let caption: string | undefined;
+    const captionIdx = args.indexOf('--caption');
+    if (captionIdx !== -1) {
+      caption = args[captionIdx + 1];
+      if (!caption) die('Missing caption text after --caption');
+    } else {
+      caption = args.slice(1, fileIdx).join(' ') || undefined;
+    }
+
     const result = await sendCommand('send_file', { target, file: path.resolve(filePath), caption });
     if (jsonMode) {
       console.log(formatJson(result));
@@ -243,6 +252,41 @@ async function cmdSend(args: string[]): Promise<void> {
   } else {
     const r = result as { jid: string; timestamp: string };
     console.log(`Sent to ${r.jid}`);
+  }
+}
+
+async function cmdMedia(args: string[]): Promise<void> {
+  requireDaemon();
+  const subcmd = args[0];
+
+  switch (subcmd) {
+    case 'download': {
+      const messageId = args[1];
+      const outDir = args[2];
+      if (!messageId || !outDir) {
+        die('Usage: whatsapp media download <message_id> <outdir>');
+      }
+
+      const result = await sendCommand('download_media', {
+        message_id: messageId,
+        outdir: path.resolve(outDir),
+      }) as {
+        message_id: string;
+        path: string;
+        file_name: string;
+        size_bytes: number;
+      };
+
+      if (jsonMode) {
+        console.log(formatJson(result));
+      } else {
+        console.log(`Downloaded. Path: ${result.path}`);
+      }
+      break;
+    }
+
+    default:
+      die(`Unknown media command: ${subcmd}\nUsage: whatsapp media download <message_id> <outdir>`);
   }
 }
 
@@ -370,6 +414,7 @@ async function main(): Promise<void> {
       case 'search':
       case 's':         await cmdSearch(cmdArgs); break;
       case 'send':      await cmdSend(cmdArgs); break;
+      case 'media':     await cmdMedia(cmdArgs); break;
       case 'typing':    await cmdTyping(cmdArgs); break;
       case 'read':      await cmdRead(cmdArgs); break;
       case 'info':      await cmdInfo(cmdArgs); break;

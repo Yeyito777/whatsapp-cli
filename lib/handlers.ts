@@ -25,7 +25,7 @@ import {
   resolveTargetToJid,
   resolveDisplayName,
 } from './db.js';
-import { getSocket, isConnected } from './connection.js';
+import { getSocket, getConnectionStatus, isConnected } from './connection.js';
 import { deserializeRawMessage } from './converters.js';
 import type {
   IpcRequest,
@@ -52,8 +52,14 @@ function resolve(target: string): string {
 }
 
 function requireConnected(req: IpcRequest): IpcResponse | null {
-  if (!isConnected()) return { id: req.id, error: 'Not connected to WhatsApp' };
-  return null;
+  if (isConnected()) return null;
+
+  const status = getConnectionStatus();
+  const parts = ['Not connected to WhatsApp'];
+  if (status.statusMessage) parts.push(status.statusMessage);
+  if (status.actionRequired) parts.push(status.actionRequired);
+
+  return { id: req.id, error: parts.join('. ') };
 }
 
 // ─── Dispatch ──────────────────────────────────────────────
@@ -96,9 +102,15 @@ export async function handleCommand(req: IpcRequest): Promise<IpcResponse> {
 // ─── Read commands (no connection required) ────────────────
 
 function cmdStatus(req: IpcRequest): IpcResponse {
+  const conn = getConnectionStatus();
   const status: DaemonStatus = {
     running: true,
-    connected: isConnected(),
+    connected: conn.connected,
+    connection_state: conn.state,
+    disconnect_reason: conn.disconnectReason,
+    disconnect_reason_name: conn.disconnectReasonName,
+    status_message: conn.statusMessage,
+    action_required: conn.actionRequired,
     uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
     phone_number: kvGet('phone_number') || '',
     message_count: getMessageCount(),

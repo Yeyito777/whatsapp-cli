@@ -12,7 +12,7 @@ import pino from 'pino';
 
 import { CONFIG_DIR, RUNTIME_DIR, SOCKET_PATH, PID_FILE, LOG_FILE } from './paths.js';
 import { getDb } from './db.js';
-import { connectWhatsApp, getSocket } from './connection.js';
+import { connectWhatsApp, getSocket, prepareForShutdown } from './connection.js';
 import { handleCommand, initHandlers } from './handlers.js';
 import type { IpcRequest } from './types.js';
 
@@ -78,6 +78,7 @@ function startIpcServer(): net.Server {
 function registerShutdown(server: net.Server): void {
   const shutdown = () => {
     logger.info('Shutting down...');
+    prepareForShutdown();
     server.close();
     try { fs.unlinkSync(SOCKET_PATH); } catch {}
     try { fs.unlinkSync(PID_FILE); } catch {}

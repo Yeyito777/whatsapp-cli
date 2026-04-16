@@ -78,6 +78,11 @@ export interface Alias {
 export interface DaemonStatus {
   running: boolean;
   connected: boolean;
+  connection_state: 'disconnected' | 'connecting' | 'connected' | 'conflict' | 'logged_out';
+  disconnect_reason: number | null;
+  disconnect_reason_name: string | null;
+  status_message: string | null;
+  action_required: string | null;
   uptime_seconds: number;
   phone_number: string;
   message_count: number;

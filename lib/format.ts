@@ -184,14 +184,28 @@ export function formatGroupInfo(info: GroupInfo): string {
 
 export function formatStatus(s: DaemonStatus): string {
   const uptime = formatUptime(s.uptime_seconds);
-  const conn = s.connected ? '✓ Connected' : '✗ Disconnected';
-  return [
+  let conn = '✗ Disconnected';
+  if (s.connection_state === 'connected') conn = '✓ Connected';
+  else if (s.connection_state === 'connecting') conn = '… Connecting';
+  else if (s.connection_state === 'conflict') conn = '⚠ Session conflict';
+  else if (s.connection_state === 'logged_out') conn = '✗ Logged out';
+
+  const lines = [
     conn,
     `Phone: +${s.phone_number || '?'}`,
     `Uptime: ${uptime}`,
     `Messages: ${s.message_count}`,
     `Chats: ${s.chat_count}`,
-  ].join('\n');
+  ];
+
+  if (s.status_message) lines.push(`Status: ${s.status_message}`);
+  if (s.disconnect_reason != null) {
+    const suffix = s.disconnect_reason_name ? ` (${s.disconnect_reason_name})` : '';
+    lines.push(`Disconnect reason: ${s.disconnect_reason}${suffix}`);
+  }
+  if (s.action_required) lines.push(`Action: ${s.action_required}`);
+
+  return lines.join('\n');
 }
 
 function formatUptime(seconds: number): string {

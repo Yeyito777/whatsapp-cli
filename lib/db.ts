@@ -2,8 +2,16 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 
 import { CONFIG_DIR, DB_PATH } from './paths.js';
-import type { StoredMessage, StoredChat, StoredContact, Alias, MessageRow, ChatRow } from './types.js';
-import { messageFromRow, chatFromRow } from './types.js';
+import type {
+  StoredMessage,
+  StoredChat,
+  StoredContact,
+  Alias,
+  MessageRow,
+  ChatRow,
+  StoredMediaMessage,
+} from './types.js';
+import { messageFromRow, chatFromRow, mediaMessageFromRow } from './types.js';
 
 // ─── Initialization ────────────────────────────────────────
 
@@ -33,6 +41,9 @@ function initSchema(): void {
       media_type TEXT,
       media_caption TEXT,
       quoted_id TEXT,
+      raw_message_json TEXT,
+      media_file_name TEXT,
+      media_mime_type TEXT,
       PRIMARY KEY (id, chat_jid)
     );
 
@@ -72,6 +83,17 @@ function initSchema(): void {
       value TEXT NOT NULL
     );
   `);
+
+  ensureColumn('messages', 'raw_message_json', 'TEXT');
+  ensureColumn('messages', 'media_file_name', 'TEXT');
+  ensureColumn('messages', 'media_mime_type', 'TEXT');
+}
+
+function ensureColumn(table: 'messages', column: string, definition: string): void {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!rows.some(row => row.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
 }
 
 // ─── Prepared Statements ───────────────────────────────────
@@ -82,6 +104,7 @@ let stmts: {
   getMessages: Database.Statement;
   getMessagesBefore: Database.Statement;
   searchMessages: Database.Statement;
+  messageById: Database.Statement;
   messageCount: Database.Statement;
   upsertChat: Database.Statement;
   allChats: Database.Statement;
@@ -108,23 +131,71 @@ let stmts: {
 function prepareStatements(): void {
   stmts = {
     upsertMessage: db.prepare(`
-      INSERT INTO messages (id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, media_type, media_caption, quoted_id)
-      VALUES (@id, @chat_jid, @sender_jid, @sender_name, @content, @timestamp, @is_from_me, @media_type, @media_caption, @quoted_id)
+      INSERT INTO messages (
+        id,
+        chat_jid,
+        sender_jid,
+        sender_name,
+        content,
+        timestamp,
+        is_from_me,
+        media_type,
+        media_caption,
+        quoted_id,
+        raw_message_json,
+        media_file_name,
+        media_mime_type
+      )
+      VALUES (
+        @id,
+        @chat_jid,
+        @sender_jid,
+        @sender_name,
+        @content,
+        @timestamp,
+        @is_from_me,
+        @media_type,
+        @media_caption,
+        @quoted_id,
+        @raw_message_json,
+        @media_file_name,
+        @media_mime_type
+      )
       ON CONFLICT(id, chat_jid) DO UPDATE SET
-        sender_name   = excluded.sender_name,
-        content       = excluded.content,
-        media_type    = excluded.media_type,
-        media_caption = excluded.media_caption
+        sender_name      = excluded.sender_name,
+        content          = excluded.content,
+        media_type       = excluded.media_type,
+        media_caption    = excluded.media_caption,
+        raw_message_json = CASE WHEN excluded.raw_message_json IS NOT NULL THEN excluded.raw_message_json ELSE messages.raw_message_json END,
+        media_file_name  = CASE WHEN excluded.media_file_name  IS NOT NULL THEN excluded.media_file_name  ELSE messages.media_file_name  END,
+        media_mime_type  = CASE WHEN excluded.media_mime_type  IS NOT NULL THEN excluded.media_mime_type  ELSE messages.media_mime_type  END
     `),
 
     getMessages: db.prepare(
-      `SELECT * FROM messages WHERE chat_jid = ? ORDER BY timestamp DESC LIMIT ?`
+      `SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, media_type, media_caption, quoted_id
+       FROM messages
+       WHERE chat_jid = ?
+       ORDER BY timestamp DESC
+       LIMIT ?`
     ),
     getMessagesBefore: db.prepare(
-      `SELECT * FROM messages WHERE chat_jid = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?`
+      `SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, media_type, media_caption, quoted_id
+       FROM messages
+       WHERE chat_jid = ? AND timestamp < ?
+       ORDER BY timestamp DESC
+       LIMIT ?`
     ),
     searchMessages: db.prepare(
-      `SELECT * FROM messages WHERE content LIKE ? ORDER BY timestamp DESC LIMIT ?`
+      `SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, media_type, media_caption, quoted_id
+       FROM messages
+       WHERE content LIKE ?
+       ORDER BY timestamp DESC
+       LIMIT ?`
+    ),
+    messageById: db.prepare(
+      `SELECT id, chat_jid, media_type, media_caption, raw_message_json, media_file_name, media_mime_type
+       FROM messages
+       WHERE id = ?`
     ),
     messageCount: db.prepare('SELECT COUNT(*) as c FROM messages'),
 
@@ -207,11 +278,19 @@ function prepareStatements(): void {
 
 function messageToParams(msg: StoredMessage): Record<string, unknown> {
   return {
-    ...msg,
+    id: msg.id,
+    chat_jid: msg.chat_jid,
+    sender_jid: msg.sender_jid,
+    sender_name: msg.sender_name,
+    content: msg.content,
+    timestamp: msg.timestamp,
     is_from_me: msg.is_from_me ? 1 : 0,
     media_type: msg.media_type || null,
     media_caption: msg.media_caption || null,
     quoted_id: msg.quoted_id || null,
+    raw_message_json: msg.raw_message_json || null,
+    media_file_name: msg.media_file_name || null,
+    media_mime_type: msg.media_mime_type || null,
   };
 }
 
@@ -238,6 +317,18 @@ export function getMessages(chatJid: string, limit = 50, before?: string): Store
 export function searchMessages(query: string, limit = 50): StoredMessage[] {
   const rows = stmts.searchMessages.all(`%${query}%`, limit) as MessageRow[];
   return rows.map(messageFromRow);
+}
+
+export function getMessageMediaById(messageId: string): StoredMediaMessage {
+  const rows = stmts.messageById.all(messageId) as MessageRow[];
+  if (rows.length === 0) {
+    throw new Error(`Message "${messageId}" not found.`);
+  }
+  if (rows.length > 1) {
+    const chats = rows.map(row => row.chat_jid).join(', ');
+    throw new Error(`Message ID "${messageId}" is ambiguous across multiple chats: ${chats}`);
+  }
+  return mediaMessageFromRow(rows[0]);
 }
 
 export function getMessageCount(): number {

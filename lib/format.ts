@@ -109,6 +109,7 @@ export function formatMessages(messages: StoredMessage[]): string {
     const content = msg.content || (msg.media_type ? `[${msg.media_type}]` : '');
 
     lines.push(`[${time}] ${reply}${sender}: ${media}${content}`);
+    lines.push(`  id: ${msg.id}`);
   }
 
   return lines.join('\n');
@@ -150,6 +151,7 @@ export function formatSearchResults(
     const chatLabel = chatNames?.[msg.chat_jid] || jidLabel(msg.chat_jid);
     lines.push(`[${time}] ${sender} in ${chatLabel}`);
     lines.push(`  ${truncate(msg.content, 120)}`);
+    lines.push(`  id: ${msg.id}`);
     lines.push('');
   }
   return lines.join('\n');

@@ -4,8 +4,7 @@
  * Single source of truth for mapping WhatsApp protocol objects to our
  * domain types. Used by both history sync and real-time event handlers.
  */
-import { normalizeMessageContent } from '@whiskeysockets/baileys';
-import type { proto } from '@whiskeysockets/baileys';
+import { normalizeMessageContent, proto } from '@whiskeysockets/baileys';
 
 import type { StoredMessage, StoredChat, StoredContact } from './types.js';
 
@@ -40,25 +39,16 @@ export function waMessageToStored(msg: proto.IWebMessageInfo): StoredMessage | n
   if (!rawJid || rawJid === 'status@broadcast') return null;
 
   const chatJid = translateJid(rawJid);
+  const media = getMediaInfo(normalized);
 
   const content =
     normalized.conversation ||
     normalized.extendedTextMessage?.text ||
-    normalized.imageMessage?.caption ||
-    normalized.videoMessage?.caption ||
-    normalized.documentMessage?.caption ||
+    media.caption ||
     '';
 
-  const mediaType = detectMediaType(normalized);
-
   // Skip protocol messages with no useful content
-  if (!content && !mediaType) return null;
-
-  const mediaCaption =
-    normalized.imageMessage?.caption ||
-    normalized.videoMessage?.caption ||
-    normalized.documentMessage?.caption ||
-    null;
+  if (!content && !media.type) return null;
 
   const quotedId = normalized.extendedTextMessage?.contextInfo?.stanzaId || null;
 
@@ -77,21 +67,113 @@ export function waMessageToStored(msg: proto.IWebMessageInfo): StoredMessage | n
     content,
     timestamp,
     is_from_me: msg.key?.fromMe || false,
-    media_type: mediaType,
-    media_caption: mediaCaption,
+    media_type: media.type,
+    media_caption: media.caption,
     quoted_id: quotedId,
+    raw_message_json: isDownloadableMediaType(media.type) ? serializeRawMessage(msg) : null,
+    media_file_name: media.fileName,
+    media_mime_type: media.mimeType,
   };
 }
 
-function detectMediaType(normalized: proto.IMessage): string | null {
-  if (normalized.imageMessage) return 'image';
-  if (normalized.videoMessage) return 'video';
-  if (normalized.audioMessage) return 'audio';
-  if (normalized.documentMessage) return 'document';
-  if (normalized.stickerMessage) return 'sticker';
-  if (normalized.contactMessage || normalized.contactsArrayMessage) return 'contact';
-  if (normalized.locationMessage || normalized.liveLocationMessage) return 'location';
-  return null;
+function isDownloadableMediaType(mediaType: string | null): boolean {
+  return mediaType === 'image' ||
+    mediaType === 'video' ||
+    mediaType === 'audio' ||
+    mediaType === 'document' ||
+    mediaType === 'sticker';
+}
+
+function getMediaInfo(normalized: proto.IMessage): {
+  type: string | null;
+  caption: string | null;
+  fileName: string | null;
+  mimeType: string | null;
+} {
+  if (normalized.imageMessage) {
+    return {
+      type: 'image',
+      caption: normalized.imageMessage.caption || null,
+      fileName: null,
+      mimeType: normalized.imageMessage.mimetype || null,
+    };
+  }
+
+  if (normalized.videoMessage) {
+    return {
+      type: 'video',
+      caption: normalized.videoMessage.caption || null,
+      fileName: null,
+      mimeType: normalized.videoMessage.mimetype || null,
+    };
+  }
+
+  if (normalized.audioMessage) {
+    return {
+      type: 'audio',
+      caption: null,
+      fileName: null,
+      mimeType: normalized.audioMessage.mimetype || null,
+    };
+  }
+
+  if (normalized.documentMessage) {
+    return {
+      type: 'document',
+      caption: normalized.documentMessage.caption || null,
+      fileName: normalized.documentMessage.fileName || null,
+      mimeType: normalized.documentMessage.mimetype || null,
+    };
+  }
+
+  if (normalized.stickerMessage) {
+    return {
+      type: 'sticker',
+      caption: null,
+      fileName: null,
+      mimeType: normalized.stickerMessage.mimetype || 'image/webp',
+    };
+  }
+
+  if (normalized.contactMessage || normalized.contactsArrayMessage) {
+    return {
+      type: 'contact',
+      caption: null,
+      fileName: null,
+      mimeType: null,
+    };
+  }
+
+  if (normalized.locationMessage || normalized.liveLocationMessage) {
+    return {
+      type: 'location',
+      caption: null,
+      fileName: null,
+      mimeType: null,
+    };
+  }
+
+  return {
+    type: null,
+    caption: null,
+    fileName: null,
+    mimeType: null,
+  };
+}
+
+export function serializeRawMessage(msg: proto.IWebMessageInfo): string {
+  const normalized = proto.WebMessageInfo.fromObject(msg);
+  const json = proto.WebMessageInfo.toObject(normalized, {
+    longs: String,
+    enums: String,
+    bytes: String,
+    defaults: false,
+  });
+  return JSON.stringify(json);
+}
+
+export function deserializeRawMessage(raw: string): proto.IWebMessageInfo {
+  return proto.WebMessageInfo.fromObject(JSON.parse(raw) as Record<string, unknown>);
 }
 
 // ─── Chats ─────────────────────────────────────────────────

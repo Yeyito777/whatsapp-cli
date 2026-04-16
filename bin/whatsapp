@@ -27,6 +27,7 @@ commands:
   sync         Force-sync group metadata
 
   send         Send a message (text, file, or reply)
+  media        Media operations (download)
   typing       Show/hide typing indicator
   read         Mark chat as read
 
@@ -65,7 +66,7 @@ case "$cmd" in
         echo "Logged out. Auth credentials removed." ;;
     daemon)
         exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} daemon "$@" ;;
-    chats|groups|contacts|messages|msgs|search|s|send|typing|read|info|context|ctx|alias|sync)
+    chats|groups|contacts|messages|msgs|search|s|send|media|typing|read|info|context|ctx|alias|sync)
         exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} "$cmd" "$@" ;;
     help|--help|-h)
         usage ;;

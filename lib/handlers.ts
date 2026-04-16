@@ -4,6 +4,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { Logger } from 'pino';
+import { downloadMediaMessage, type WAMessage } from '@whiskeysockets/baileys';
 
 import {
   getMessages,
@@ -13,6 +14,7 @@ import {
   getAllContacts,
   getMessageCount,
   getChatCount,
+  getMessageMediaById,
   upsertMessage,
   upsertChat,
   kvGet,
@@ -24,6 +26,7 @@ import {
   resolveDisplayName,
 } from './db.js';
 import { getSocket, isConnected } from './connection.js';
+import { deserializeRawMessage } from './converters.js';
 import type {
   IpcRequest,
   IpcResponse,
@@ -60,25 +63,26 @@ export async function handleCommand(req: IpcRequest): Promise<IpcResponse> {
     const { method, params } = req;
 
     switch (method) {
-      case 'status':      return cmdStatus(req);
-      case 'chats':       return cmdChats(req);
-      case 'groups':      return cmdGroups(req);
-      case 'contacts':    return cmdContacts(req);
-      case 'messages':    return cmdMessages(req, params);
-      case 'search':      return cmdSearch(req, params);
-      case 'send':        return await cmdSend(req, params);
-      case 'send_file':   return await cmdSendFile(req, params);
-      case 'typing':      return await cmdTyping(req, params);
-      case 'mark_read':   return await cmdMarkRead(req, params);
-      case 'group_info':  return await cmdGroupInfo(req, params);
-      case 'sync_groups': return await cmdSyncGroups(req);
-      case 'alias_list':  return cmdAliasList(req);
-      case 'alias_set':   return cmdAliasSet(req, params);
-      case 'alias_remove':return cmdAliasRemove(req, params);
-      case 'context':     return cmdContext(req);
-      case 'resolve':     return cmdResolve(req, params);
-      case 'ping':        return { id: req.id, result: 'pong' };
-      case 'shutdown':    return cmdShutdown(req);
+      case 'status':        return cmdStatus(req);
+      case 'chats':         return cmdChats(req);
+      case 'groups':        return cmdGroups(req);
+      case 'contacts':      return cmdContacts(req);
+      case 'messages':      return cmdMessages(req, params);
+      case 'search':        return cmdSearch(req, params);
+      case 'send':          return await cmdSend(req, params);
+      case 'send_file':     return await cmdSendFile(req, params);
+      case 'download_media':return await cmdDownloadMedia(req, params);
+      case 'typing':        return await cmdTyping(req, params);
+      case 'mark_read':     return await cmdMarkRead(req, params);
+      case 'group_info':    return await cmdGroupInfo(req, params);
+      case 'sync_groups':   return await cmdSyncGroups(req);
+      case 'alias_list':    return cmdAliasList(req);
+      case 'alias_set':     return cmdAliasSet(req, params);
+      case 'alias_remove':  return cmdAliasRemove(req, params);
+      case 'context':       return cmdContext(req);
+      case 'resolve':       return cmdResolve(req, params);
+      case 'ping':          return { id: req.id, result: 'pong' };
+      case 'shutdown':      return cmdShutdown(req);
       default:
         return { id: req.id, error: `Unknown method: ${method}` };
     }
@@ -193,6 +197,70 @@ async function cmdSendFile(req: IpcRequest, params?: Record<string, unknown>): P
   return { id: req.id, result: { status: 'sent', id: sent?.key?.id, jid } };
 }
 
+async function cmdDownloadMedia(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
+  const err = requireConnected(req);
+  if (err) return err;
+
+  const messageId = params?.message_id as string;
+  const outDir = params?.outdir as string;
+  if (!messageId) return { id: req.id, error: 'Missing message ID' };
+  if (!outDir) return { id: req.id, error: 'Missing output directory' };
+
+  const mediaMsg = getMessageMediaById(messageId);
+  if (!isDownloadableMediaType(mediaMsg.media_type)) {
+    return { id: req.id, error: `Message "${messageId}" does not have downloadable media.` };
+  }
+  if (!mediaMsg.raw_message_json) {
+    return {
+      id: req.id,
+      error: `Media metadata for message "${messageId}" is unavailable. The message may have been stored before media-download support was added.`,
+    };
+  }
+
+  ensureDirectory(outDir);
+
+  const sock = getSocket();
+  const rawMessage = deserializeRawMessage(mediaMsg.raw_message_json) as WAMessage;
+  const buffer = await downloadMediaMessage(rawMessage, 'buffer', {}, {
+    logger,
+    reuploadRequest: (message) => sock.updateMediaMessage(message),
+  });
+
+  const fileName = buildMediaFileName({
+    messageId,
+    mediaType: mediaMsg.media_type,
+    originalFileName: mediaMsg.media_file_name,
+    mimeType: mediaMsg.media_mime_type,
+  });
+  const outputPath = uniquePath(path.join(outDir, fileName));
+
+  fs.writeFileSync(outputPath, buffer);
+
+  logger.info({ messageId, outputPath, bytes: buffer.length }, 'Media downloaded');
+
+  return {
+    id: req.id,
+    result: {
+      status: 'downloaded',
+      message_id: messageId,
+      chat_jid: mediaMsg.chat_jid,
+      media_type: mediaMsg.media_type,
+      mime_type: mediaMsg.media_mime_type,
+      file_name: path.basename(outputPath),
+      path: outputPath,
+      size_bytes: buffer.length,
+    },
+  };
+}
+
+function isDownloadableMediaType(mediaType: string | null): boolean {
+  return mediaType === 'image' ||
+    mediaType === 'video' ||
+    mediaType === 'audio' ||
+    mediaType === 'document' ||
+    mediaType === 'sticker';
+}
+
 function buildFilePayload(filePath: string, buf: Buffer, caption?: string): Record<string, unknown> {
   const ext = path.extname(filePath).toLowerCase();
 
@@ -209,6 +277,90 @@ function buildFilePayload(filePath: string, buf: Buffer, caption?: string): Reco
     mimetype: 'application/octet-stream',
     caption,
   };
+}
+
+function ensureDirectory(outDir: string): void {
+  if (fs.existsSync(outDir) && !fs.statSync(outDir).isDirectory()) {
+    throw new Error(`Output path is not a directory: ${outDir}`);
+  }
+  fs.mkdirSync(outDir, { recursive: true });
+}
+
+function buildMediaFileName(args: {
+  messageId: string;
+  mediaType: string | null;
+  originalFileName: string | null;
+  mimeType: string | null;
+}): string {
+  const requestedName = sanitizeFileName(args.originalFileName || '');
+  if (requestedName) {
+    return requestedName;
+  }
+
+  const ext = extensionForMime(args.mimeType) || extensionForMediaType(args.mediaType);
+  return `wa-${args.messageId}${ext}`;
+}
+
+function sanitizeFileName(fileName: string): string {
+  const base = path.basename(fileName).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim();
+  return base.replace(/^\.+$/, '').trim();
+}
+
+function extensionForMediaType(mediaType: string | null): string {
+  switch (mediaType) {
+    case 'image': return '.jpg';
+    case 'video': return '.mp4';
+    case 'audio': return '.ogg';
+    case 'document': return '.bin';
+    case 'sticker': return '.webp';
+    default: return '';
+  }
+}
+
+function extensionForMime(mimeType: string | null): string {
+  const normalized = mimeType?.split(';')[0]?.trim().toLowerCase();
+  if (!normalized) return '';
+
+  const known: Record<string, string> = {
+    'image/jpeg': '.jpg',
+    'image/jpg': '.jpg',
+    'image/png': '.png',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'video/mp4': '.mp4',
+    'video/quicktime': '.mov',
+    'audio/ogg': '.ogg',
+    'audio/ogg; codecs=opus': '.ogg',
+    'audio/mp4': '.m4a',
+    'audio/mpeg': '.mp3',
+    'audio/wav': '.wav',
+    'application/pdf': '.pdf',
+    'application/zip': '.zip',
+    'text/plain': '.txt',
+  };
+
+  if (known[normalized]) return known[normalized];
+
+  const subtype = normalized.split('/')[1];
+  if (!subtype) return '';
+
+  const ext = subtype.split('+')[0].replace(/^x-/, '');
+  return /^[a-z0-9.-]+$/.test(ext) ? `.${ext}` : '';
+}
+
+function uniquePath(filePath: string): string {
+  if (!fs.existsSync(filePath)) return filePath;
+
+  const dir = path.dirname(filePath);
+  const ext = path.extname(filePath);
+  const base = path.basename(filePath, ext);
+
+  for (let i = 2; i < 10_000; i++) {
+    const candidate = path.join(dir, `${base}-${i}${ext}`);
+    if (!fs.existsSync(candidate)) return candidate;
+  }
+
+  throw new Error(`Could not allocate output file name in ${dir}`);
 }
 
 async function cmdTyping(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {

@@ -8,8 +8,9 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { sendCommand, isDaemonRunning, getDaemonPid } from './client.js';
+import { sendCommand, isDaemonRunning } from './client.js';
 import { PROJECT_ROOT } from './paths.js';
+import { manageExternalToolDaemon } from './exocortex.js';
 import {
   formatChats,
   formatMessages,
@@ -61,61 +62,20 @@ async function cmdDaemon(args: string[]): Promise<void> {
 
   switch (subcmd) {
     case 'start': {
-      if (isDaemonRunning()) {
-        const pid = getDaemonPid();
-        console.log(`Daemon already running (PID ${pid})`);
-        return;
-      }
-
-      const daemonScript = path.join(PROJECT_ROOT, 'lib', 'daemon.ts');
-      const logFile = path.join(PROJECT_ROOT, 'config', 'daemon.log');
-      fs.mkdirSync(path.dirname(logFile), { recursive: true });
-
-      const out = fs.openSync(logFile, 'a');
-      const err = fs.openSync(logFile, 'a');
-
-      const child = spawn('npx', ['tsx', daemonScript], {
-        cwd: PROJECT_ROOT,
-        detached: true,
-        stdio: ['ignore', out, err],
-      });
-
-      child.unref();
-      console.log(`Daemon starting (PID ${child.pid})`);
-
-      await new Promise(r => setTimeout(r, 2000));
-      if (isDaemonRunning()) {
-        console.log('Daemon started successfully');
-      } else {
-        console.error('Daemon failed to start. Check: whatsapp daemon logs');
-        process.exit(1);
-      }
+      const status = await manageExternalToolDaemon('whatsapp', 'start');
+      console.log(status.message);
       break;
     }
 
     case 'stop': {
-      const pid = getDaemonPid();
-      if (!pid) {
-        console.log('Daemon not running');
-        return;
-      }
-      try {
-        await sendCommand('shutdown');
-      } catch {
-        try { process.kill(pid, 'SIGTERM'); } catch {}
-      }
-      console.log(`Daemon stopped (PID ${pid})`);
+      const status = await manageExternalToolDaemon('whatsapp', 'stop');
+      console.log(status.message);
       break;
     }
 
     case 'restart': {
-      const pid = getDaemonPid();
-      if (pid) {
-        try { await sendCommand('shutdown'); } catch {}
-        try { process.kill(pid, 'SIGTERM'); } catch {}
-        await new Promise(r => setTimeout(r, 2000));
-      }
-      await cmdDaemon(['start']);
+      const status = await manageExternalToolDaemon('whatsapp', 'restart');
+      console.log(status.message);
       break;
     }
 

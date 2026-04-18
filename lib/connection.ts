@@ -150,6 +150,16 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
 
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
+    logger.info({
+      authMeId: state.creds.me?.id ?? null,
+      authMeLid: state.creds.me?.lid ?? null,
+      authName: state.creds.me?.name ?? null,
+      registered: state.creds.registered,
+      platform: state.creds.platform ?? null,
+      accountSyncCounter: state.creds.accountSyncCounter ?? null,
+      lastAccountSyncTimestamp: state.creds.lastAccountSyncTimestamp ?? null,
+    }, 'Loaded WhatsApp auth state');
+
     // Check for auth: 'registered' is only true for primary devices.
     // Linked devices (our case) have me.id set instead.
     if (!state.creds.registered && !state.creds.me?.id) {
@@ -200,7 +210,18 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
     nextSock.ev.on('connection.update', (update) => {
       if (!isCurrentSocket(socketId, nextSock)) return;
 
-      const { connection, lastDisconnect } = update;
+      const { connection, lastDisconnect, isNewLogin, receivedPendingNotifications, qr } = update;
+
+      logger.info({
+        socketId,
+        connection: connection ?? null,
+        isNewLogin: isNewLogin ?? null,
+        receivedPendingNotifications: receivedPendingNotifications ?? null,
+        hasQr: Boolean(qr),
+        lastDisconnectMessage: lastDisconnect?.error ? String(lastDisconnect.error) : null,
+        lastDisconnectData: (lastDisconnect?.error as { data?: unknown } | undefined)?.data ?? null,
+        lastDisconnectOutput: (lastDisconnect?.error as { output?: unknown } | undefined)?.output ?? null,
+      }, 'connection.update');
 
       if (connection === 'close') {
         const reason = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode ?? null;

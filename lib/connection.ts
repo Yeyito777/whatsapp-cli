@@ -32,6 +32,8 @@ import {
   baileysChatToStored,
   baileysContactToStored,
   registerLidMapping,
+  translateJid,
+  getMessageEphemeralExpiration,
 } from './converters.js';
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'conflict' | 'logged_out';
@@ -321,6 +323,13 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
       if (!isCurrentSocket(socketId, nextSock)) return;
 
       for (const msg of messages) {
+        const rawChatJid = msg.key?.remoteJid;
+        const chatJid = rawChatJid && rawChatJid !== 'status@broadcast' ? translateJid(rawChatJid) : null;
+        const ephemeralExpiration = getMessageEphemeralExpiration(msg);
+        if (chatJid && ephemeralExpiration !== undefined) {
+          upsertChat({ jid: chatJid, ephemeral_expiration: ephemeralExpiration });
+        }
+
         const stored = waMessageToStored(msg);
         if (!stored) continue;
 
@@ -331,6 +340,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
           is_group: stored.chat_jid.endsWith('@g.us'),
           last_message_time: stored.timestamp,
           last_message_preview: (stored.content || stored.media_caption || '').slice(0, 100),
+          ephemeral_expiration: ephemeralExpiration,
         });
 
         logger.debug({
@@ -360,6 +370,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
           muted: u.muteEndTime != null ? Number(u.muteEndTime) > 0 : undefined,
           pinned: u.pinned != null ? Number(u.pinned) > 0 : undefined,
           archived: u.archived,
+          ephemeral_expiration: (u as unknown as { ephemeralExpiration?: number | null }).ephemeralExpiration ?? undefined,
         } as Partial<import('./types.js').StoredChat> & { jid: string });
       }
     });

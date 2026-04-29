@@ -18,6 +18,7 @@ import {
   upsertMessage,
   upsertChat,
   kvGet,
+  getChatEphemeralExpiration,
   getAllAliases,
   setAlias,
   removeAlias,
@@ -151,6 +152,32 @@ function cmdSearch(req: IpcRequest, params?: Record<string, unknown>): IpcRespon
 
 // ─── Write commands (connection required) ──────────────────
 
+async function sendOptionsForChat(jid: string): Promise<Record<string, unknown> | undefined> {
+  const cachedExpiration = getChatEphemeralExpiration(jid);
+  if (cachedExpiration && cachedExpiration > 0) {
+    return { ephemeralExpiration: cachedExpiration };
+  }
+
+  // If the cache has no setting yet, group metadata can provide it on demand.
+  // There is no equivalent public metadata query for 1:1 chats in Baileys.
+  if (cachedExpiration == null && jid.endsWith('@g.us')) {
+    try {
+      const metadata = await getSocket().groupMetadata(jid);
+      const metadataExpiration = metadata.ephemeralDuration;
+      if (metadataExpiration != null) {
+        upsertChat({ jid, ephemeral_expiration: metadataExpiration });
+        if (metadataExpiration > 0) {
+          return { ephemeralExpiration: metadataExpiration };
+        }
+      }
+    } catch {
+      // Best-effort only. Sending should not fail just because metadata lookup did.
+    }
+  }
+
+  return undefined;
+}
+
 async function cmdSend(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
   const err = requireConnected(req);
   if (err) return err;
@@ -172,7 +199,7 @@ async function cmdSend(req: IpcRequest, params?: Record<string, unknown>): Promi
     };
   }
 
-  const sent = await sock.sendMessage(jid, sendOpts as { text: string });
+  const sent = await sock.sendMessage(jid, sendOpts as { text: string }, await sendOptionsForChat(jid));
   const sentMsg: StoredMessage = {
     id: sent?.key?.id || `${Date.now()}`,
     chat_jid: jid,
@@ -205,7 +232,7 @@ async function cmdSendFile(req: IpcRequest, params?: Record<string, unknown>): P
   const buf = fs.readFileSync(filePath);
   const sendPayload = buildFilePayload(filePath, buf, caption);
 
-  const sent = await sock.sendMessage(jid, sendPayload as Parameters<typeof sock.sendMessage>[1]);
+  const sent = await sock.sendMessage(jid, sendPayload as Parameters<typeof sock.sendMessage>[1], await sendOptionsForChat(jid));
   return { id: req.id, result: { status: 'sent', id: sent?.key?.id, jid } };
 }
 
@@ -414,6 +441,12 @@ async function cmdGroupInfo(req: IpcRequest, params?: Record<string, unknown>): 
   if (!jid.endsWith('@g.us')) return { id: req.id, error: 'Not a group JID' };
 
   const metadata = await getSocket().groupMetadata(jid);
+  upsertChat({
+    jid,
+    name: metadata.subject || '',
+    is_group: true,
+    ephemeral_expiration: metadata.ephemeralDuration ?? undefined,
+  });
   const info: GroupInfo = {
     jid,
     name: metadata.subject || '',
@@ -439,7 +472,12 @@ async function cmdSyncGroups(req: IpcRequest): Promise<IpcResponse> {
   let count = 0;
   for (const [jid, metadata] of Object.entries(groups)) {
     if (metadata.subject) {
-      upsertChat({ jid, name: metadata.subject, is_group: true });
+      upsertChat({
+        jid,
+        name: metadata.subject,
+        is_group: true,
+        ephemeral_expiration: metadata.ephemeralDuration ?? undefined,
+      });
       count++;
     }
   }

@@ -76,6 +76,42 @@ export function waMessageToStored(msg: proto.IWebMessageInfo): StoredMessage | n
   };
 }
 
+/**
+ * Returns the disappearing-message duration signalled by a message, in seconds.
+ * undefined means the message carried no setting; 0 means disappearing was
+ * explicitly turned off for the chat.
+ */
+export function getMessageEphemeralExpiration(msg: proto.IWebMessageInfo): number | undefined {
+  if (!msg.message) return undefined;
+
+  const normalized = normalizeMessageContent(msg.message);
+  if (!normalized) return undefined;
+
+  const protocol = normalized.protocolMessage;
+  if (protocol?.type === proto.Message.ProtocolMessage.Type.EPHEMERAL_SETTING) {
+    return normalizeExpiration(protocol.ephemeralExpiration);
+  }
+
+  const contextInfo = getFirstContextInfo(normalized);
+  return normalizeExpiration(contextInfo?.expiration);
+}
+
+function getFirstContextInfo(message: proto.IMessage): proto.IContextInfo | undefined {
+  for (const value of Object.values(message)) {
+    if (!value || typeof value !== 'object') continue;
+    const maybeContext = (value as { contextInfo?: proto.IContextInfo }).contextInfo;
+    if (maybeContext) return maybeContext;
+  }
+  return undefined;
+}
+
+function normalizeExpiration(value: unknown): number | undefined {
+  if (value == null) return undefined;
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return Math.floor(n);
+}
+
 function isDownloadableMediaType(mediaType: string | null): boolean {
   return mediaType === 'image' ||
     mediaType === 'video' ||
@@ -192,6 +228,7 @@ export function baileysChatToStored(c: proto.IConversation & Record<string, unkn
     muted: Number(c.muteEndTime || 0) > 0,
     pinned: Number(c.pinned || 0) > 0,
     archived: (c.archived as boolean) || false,
+    ephemeral_expiration: c.ephemeralExpiration == null ? undefined : Number(c.ephemeralExpiration),
   };
 }
 

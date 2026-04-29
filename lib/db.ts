@@ -62,7 +62,8 @@ function initSchema(): void {
       unread_count INTEGER NOT NULL DEFAULT 0,
       muted INTEGER NOT NULL DEFAULT 0,
       pinned INTEGER NOT NULL DEFAULT 0,
-      archived INTEGER NOT NULL DEFAULT 0
+      archived INTEGER NOT NULL DEFAULT 0,
+      ephemeral_expiration INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS contacts (
@@ -87,9 +88,10 @@ function initSchema(): void {
   ensureColumn('messages', 'raw_message_json', 'TEXT');
   ensureColumn('messages', 'media_file_name', 'TEXT');
   ensureColumn('messages', 'media_mime_type', 'TEXT');
+  ensureColumn('chats', 'ephemeral_expiration', 'INTEGER');
 }
 
-function ensureColumn(table: 'messages', column: string, definition: string): void {
+function ensureColumn(table: 'messages' | 'chats', column: string, definition: string): void {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (!rows.some(row => row.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
@@ -117,6 +119,7 @@ let stmts: {
   kvGet: Database.Statement;
   kvSet: Database.Statement;
   chatNameByJid: Database.Statement;
+  chatEphemeralByJid: Database.Statement;
   upsertAlias: Database.Statement;
   deleteAlias: Database.Statement;
   allAliases: Database.Statement;
@@ -200,10 +203,11 @@ function prepareStatements(): void {
     messageCount: db.prepare('SELECT COUNT(*) as c FROM messages'),
 
     // Chat upsert: only overwrites fields when the new value is meaningful.
-    // Empty strings, 0, and -1 are treated as "no data" and won't clobber existing values.
+    // Empty strings and -1 are treated as "no data" and won't clobber existing values.
+    // ephemeral_expiration uses -1 for unknown; 0 is meaningful (disappearing off).
     upsertChat: db.prepare(`
-      INSERT INTO chats (jid, name, is_group, last_message_time, last_message_preview, unread_count, muted, pinned, archived)
-      VALUES (@jid, @name, @is_group, @last_message_time, @last_message_preview, @unread_count, @muted, @pinned, @archived)
+      INSERT INTO chats (jid, name, is_group, last_message_time, last_message_preview, unread_count, muted, pinned, archived, ephemeral_expiration)
+      VALUES (@jid, @name, @is_group, @last_message_time, @last_message_preview, @unread_count, @muted, @pinned, @archived, @ephemeral_expiration)
       ON CONFLICT(jid) DO UPDATE SET
         name                = CASE WHEN excluded.name != ''  THEN excluded.name                ELSE chats.name                END,
         is_group            = CASE WHEN excluded.is_group > 0 THEN excluded.is_group            ELSE chats.is_group            END,
@@ -214,7 +218,8 @@ function prepareStatements(): void {
         unread_count        = CASE WHEN excluded.unread_count >= 0 THEN excluded.unread_count   ELSE chats.unread_count        END,
         muted               = CASE WHEN excluded.muted   >= 0 THEN excluded.muted              ELSE chats.muted               END,
         pinned              = CASE WHEN excluded.pinned  >= 0 THEN excluded.pinned             ELSE chats.pinned              END,
-        archived            = CASE WHEN excluded.archived >= 0 THEN excluded.archived           ELSE chats.archived            END
+        archived            = CASE WHEN excluded.archived >= 0 THEN excluded.archived           ELSE chats.archived            END,
+        ephemeral_expiration= CASE WHEN excluded.ephemeral_expiration >= 0 THEN excluded.ephemeral_expiration ELSE chats.ephemeral_expiration END
     `),
     allChats: db.prepare(
       `SELECT * FROM chats ORDER BY pinned DESC, last_message_time DESC`
@@ -231,6 +236,9 @@ function prepareStatements(): void {
     ),
     chatNameByJid: db.prepare(
       `SELECT name FROM chats WHERE jid = ?`
+    ),
+    chatEphemeralByJid: db.prepare(
+      `SELECT ephemeral_expiration FROM chats WHERE jid = ?`
     ),
 
     upsertContact: db.prepare(`
@@ -352,6 +360,7 @@ export function upsertChat(chat: Partial<StoredChat> & { jid: string }): void {
     muted: chat.muted === true ? 1 : chat.muted === false ? 0 : -1,
     pinned: chat.pinned === true ? 1 : chat.pinned === false ? 0 : -1,
     archived: chat.archived === true ? 1 : chat.archived === false ? 0 : -1,
+    ephemeral_expiration: chat.ephemeral_expiration ?? -1,
   });
 }
 
@@ -385,6 +394,11 @@ export function findChatByName(name: string): StoredChat | undefined {
 export function getChatName(jid: string): string | undefined {
   const row = stmts.chatNameByJid.get(jid) as { name: string } | undefined;
   return row?.name || undefined;
+}
+
+export function getChatEphemeralExpiration(jid: string): number | null {
+  const row = stmts.chatEphemeralByJid.get(jid) as { ephemeral_expiration: number | null } | undefined;
+  return row?.ephemeral_expiration ?? null;
 }
 
 // ─── Contacts ──────────────────────────────────────────────

@@ -43,6 +43,10 @@ export interface StoredChat {
   muted: boolean;
   pinned: boolean;
   archived: boolean;
+
+  // WhatsApp disappearing-message duration for this chat, in seconds.
+  // null means unknown/off; 0 means explicitly off.
+  ephemeral_expiration: number | null;
 }
 
 export interface StoredContact {
@@ -129,6 +133,7 @@ export interface ChatRow {
   muted: 0 | 1;
   pinned: 0 | 1;
   archived: 0 | 1;
+  ephemeral_expiration: number | null;
 }
 
 // ─── Row → Domain Converters ──────────────────────────────

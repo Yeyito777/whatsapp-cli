@@ -26,7 +26,7 @@ import {
   resolveTargetToJid,
   resolveDisplayName,
 } from './db.js';
-import { getSocket, getConnectionStatus, isConnected } from './connection.js';
+import { getSocket, getConnectionStatus, isConnected, waitForConnection } from './connection.js';
 import { deserializeRawMessage } from './converters.js';
 import type {
   IpcRequest,
@@ -52,8 +52,10 @@ function resolve(target: string): string {
   return resolveTargetToJid(target);
 }
 
-function requireConnected(req: IpcRequest): IpcResponse | null {
-  if (isConnected()) return null;
+const CONNECTION_READY_TIMEOUT_MS = 10_000;
+
+async function requireConnected(req: IpcRequest): Promise<IpcResponse | null> {
+  if (await waitForConnection(CONNECTION_READY_TIMEOUT_MS)) return null;
 
   const status = getConnectionStatus();
   const parts = ['Not connected to WhatsApp'];
@@ -179,7 +181,7 @@ async function sendOptionsForChat(jid: string): Promise<Record<string, unknown> 
 }
 
 async function cmdSend(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
-  const err = requireConnected(req);
+  const err = await requireConnected(req);
   if (err) return err;
 
   const target = params?.target as string;
@@ -217,7 +219,7 @@ async function cmdSend(req: IpcRequest, params?: Record<string, unknown>): Promi
 }
 
 async function cmdSendFile(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
-  const err = requireConnected(req);
+  const err = await requireConnected(req);
   if (err) return err;
 
   const target = params?.target as string;
@@ -237,7 +239,7 @@ async function cmdSendFile(req: IpcRequest, params?: Record<string, unknown>): P
 }
 
 async function cmdDownloadMedia(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
-  const err = requireConnected(req);
+  const err = await requireConnected(req);
   if (err) return err;
 
   const messageId = params?.message_id as string;
@@ -403,7 +405,7 @@ function uniquePath(filePath: string): string {
 }
 
 async function cmdTyping(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
-  const err = requireConnected(req);
+  const err = await requireConnected(req);
   if (err) return err;
 
   const target = params?.target as string;
@@ -416,7 +418,7 @@ async function cmdTyping(req: IpcRequest, params?: Record<string, unknown>): Pro
 }
 
 async function cmdMarkRead(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
-  const err = requireConnected(req);
+  const err = await requireConnected(req);
   if (err) return err;
 
   const target = params?.target as string;
@@ -431,7 +433,7 @@ async function cmdMarkRead(req: IpcRequest, params?: Record<string, unknown>): P
 }
 
 async function cmdGroupInfo(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
-  const err = requireConnected(req);
+  const err = await requireConnected(req);
   if (err) return err;
 
   const target = params?.target as string;
@@ -465,7 +467,7 @@ async function cmdGroupInfo(req: IpcRequest, params?: Record<string, unknown>): 
 }
 
 async function cmdSyncGroups(req: IpcRequest): Promise<IpcResponse> {
-  const err = requireConnected(req);
+  const err = await requireConnected(req);
   if (err) return err;
 
   const groups = await getSocket().groupFetchAllParticipating();

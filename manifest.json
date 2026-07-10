@@ -2,8 +2,8 @@
   "name": "whatsapp",
   "bin": "./bin/whatsapp",
   "daemon": {
-    "command": "npx tsx lib/daemon.ts",
-    "restart": "on-failure",
+    "command": "node --import tsx lib/daemon.ts",
+    "restart": "always",
     "env": {
       "NODE_ENV": "production",
       "WA_LOG_LEVEL": "info"

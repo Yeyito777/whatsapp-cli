@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "test": "bun test",
     "daemon": "tsx lib/daemon.ts",
     "auth": "tsx lib/auth.ts"
   },

@@ -35,6 +35,7 @@ import {
   translateJid,
   getMessageEphemeralExpiration,
 } from './converters.js';
+import { ConnectionReadinessGate } from './readiness.js';
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'conflict' | 'logged_out';
 
@@ -61,6 +62,7 @@ let disconnectReason: number | null = null;
 let disconnectReasonName: string | null = null;
 let statusMessage: string | null = null;
 let actionRequired: string | null = null;
+const readiness = new ConnectionReadinessGate('disconnected');
 
 // Baileys is extremely noisy — give it a silent logger
 const baileysLogger = pino({ level: 'silent' });
@@ -71,6 +73,11 @@ export function getSocket(): WASocket {
 }
 
 export function isConnected(): boolean { return connected; }
+
+/** Wait briefly for an in-progress startup/reconnect to become usable. */
+export function waitForConnection(timeoutMs = 10_000): Promise<boolean> {
+  return readiness.wait(timeoutMs);
+}
 
 export function getConnectionStatus(): ConnectionStatus {
   return {
@@ -86,6 +93,7 @@ export function getConnectionStatus(): ConnectionStatus {
 export function prepareForShutdown(): void {
   stopping = true;
   clearReconnectTimer();
+  readiness.cancel();
 }
 
 function isCurrentSocket(socketId: number, candidate: WASocket): boolean {
@@ -107,6 +115,7 @@ function disconnectReasonNameFor(reason: number | null): string | null {
 function resetConnectionStatus(state: ConnectionState): void {
   connected = state === 'connected';
   connectionState = state;
+  readiness.setState(state);
   disconnectReason = null;
   disconnectReasonName = null;
   statusMessage = null;
@@ -121,6 +130,7 @@ function setDisconnectedState(
 ): void {
   connected = false;
   connectionState = state;
+  readiness.setState(state);
   disconnectReason = reason;
   disconnectReasonName = disconnectReasonNameFor(reason);
   statusMessage = message;

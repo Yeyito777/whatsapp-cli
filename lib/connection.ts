@@ -26,6 +26,7 @@ import {
   upsertContact,
   upsertContacts,
   kvSet,
+  getKnownLidJids,
 } from './db.js';
 import {
   waMessageToStored,
@@ -161,6 +162,22 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
     fs.mkdirSync(AUTH_DIR, { recursive: true });
 
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+
+    // Baileys persists LID↔phone mappings in its auth key store, but it does
+    // not replay lid-mapping.update events after a daemon restart. Rehydrate
+    // mappings for IDs in local history so phone-number queries still include
+    // replies that WhatsApp delivered under their opaque LID identity.
+    const knownLids = getKnownLidJids();
+    if (knownLids.length > 0) {
+      const reverseKeys = knownLids.map(lid => `${lid.split('@')[0].split(':')[0]}_reverse`);
+      const mappings = await state.keys.get('lid-mapping', reverseKeys);
+      for (let i = 0; i < knownLids.length; i++) {
+        const phoneUser = mappings[reverseKeys[i]];
+        if (typeof phoneUser === 'string' && phoneUser) {
+          registerLidMapping(knownLids[i], `${phoneUser}@s.whatsapp.net`);
+        }
+      }
+    }
 
     logger.info({
       authMeId: state.creds.me?.id ?? null,

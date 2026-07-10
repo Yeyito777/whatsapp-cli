@@ -14,17 +14,31 @@ import type { StoredMessage, StoredChat, StoredContact } from './types.js';
 // opaque LID identifiers instead of phone-based JIDs. We cache
 // translations as we discover them.
 const lidToPhoneMap: Record<string, string> = {};
+const phoneToLidMap: Record<string, string> = {};
 
 export function registerLidMapping(lid: string, phone: string): void {
   const lidUser = lid.split('@')[0].split(':')[0];
   const phoneUser = phone.split('@')[0].split(':')[0];
   lidToPhoneMap[lidUser] = `${phoneUser}@s.whatsapp.net`;
+  phoneToLidMap[phoneUser] = `${lidUser}@lid`;
 }
 
 export function translateJid(jid: string): string {
   if (!jid.endsWith('@lid')) return jid;
   const lidUser = jid.split('@')[0].split(':')[0];
   return lidToPhoneMap[lidUser] || jid;
+}
+
+/** Return both identities WhatsApp may use for the same one-to-one chat. */
+export function equivalentJids(jid: string): [string, string] {
+  const user = jid.split('@')[0].split(':')[0];
+  if (jid.endsWith('@lid')) {
+    return [jid, lidToPhoneMap[user] || jid];
+  }
+  if (jid.endsWith('@s.whatsapp.net')) {
+    return [jid, phoneToLidMap[user] || jid];
+  }
+  return [jid, jid];
 }
 
 // ─── Messages ──────────────────────────────────────────────

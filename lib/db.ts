@@ -177,14 +177,14 @@ function prepareStatements(): void {
     getMessages: db.prepare(
       `SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, media_type, media_caption, quoted_id
        FROM messages
-       WHERE chat_jid = ?
+       WHERE chat_jid = ? OR chat_jid = ?
        ORDER BY timestamp DESC
        LIMIT ?`
     ),
     getMessagesBefore: db.prepare(
       `SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, media_type, media_caption, quoted_id
        FROM messages
-       WHERE chat_jid = ? AND timestamp < ?
+       WHERE (chat_jid = ? OR chat_jid = ?) AND timestamp < ?
        ORDER BY timestamp DESC
        LIMIT ?`
     ),
@@ -316,10 +316,28 @@ export function upsertMessages(msgs: StoredMessage[]): void {
 }
 
 export function getMessages(chatJid: string, limit = 50, before?: string): StoredMessage[] {
+  return getMessagesForJids(chatJid, chatJid, limit, before);
+}
+
+/** Read a DM across its phone-number and Linked Identity chat IDs. */
+export function getMessagesForJids(chatJid: string, alternateJid: string, limit = 50, before?: string): StoredMessage[] {
   const rows = before
-    ? stmts.getMessagesBefore.all(chatJid, before, limit) as MessageRow[]
-    : stmts.getMessages.all(chatJid, limit) as MessageRow[];
+    ? stmts.getMessagesBefore.all(chatJid, alternateJid, before, limit) as MessageRow[]
+    : stmts.getMessages.all(chatJid, alternateJid, limit) as MessageRow[];
   return rows.map(messageFromRow);
+}
+
+/** LID chat IDs already present in local history, used to restore mappings after restart. */
+export function getKnownLidJids(): string[] {
+  const rows = db.prepare(`
+    SELECT jid FROM (
+      SELECT chat_jid AS jid FROM messages WHERE chat_jid LIKE '%@lid'
+      UNION SELECT sender_jid AS jid FROM messages WHERE sender_jid LIKE '%@lid'
+      UNION SELECT jid FROM chats WHERE jid LIKE '%@lid'
+      UNION SELECT jid FROM contacts WHERE jid LIKE '%@lid'
+    )
+  `).all() as Array<{ jid: string }>;
+  return rows.map(row => row.jid);
 }
 
 export function searchMessages(query: string, limit = 50): StoredMessage[] {

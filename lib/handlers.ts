@@ -7,7 +7,7 @@ import type { Logger } from 'pino';
 import { downloadMediaMessage, type WAMessage } from '@whiskeysockets/baileys';
 
 import {
-  getMessages,
+  getMessagesForJids,
   searchMessages,
   getAllChats,
   getGroups,
@@ -27,7 +27,7 @@ import {
   resolveDisplayName,
 } from './db.js';
 import { getSocket, getConnectionStatus, isConnected, waitForConnection } from './connection.js';
-import { deserializeRawMessage } from './converters.js';
+import { deserializeRawMessage, equivalentJids } from './converters.js';
 import type {
   IpcRequest,
   IpcResponse,
@@ -139,9 +139,10 @@ function cmdMessages(req: IpcRequest, params?: Record<string, unknown>): IpcResp
   if (!target) return { id: req.id, error: 'Missing target (JID or name)' };
 
   const jid = resolve(target);
+  const [primaryJid, alternateJid] = equivalentJids(jid);
   const limit = (params?.limit as number) || 50;
   const before = params?.before as string | undefined;
-  const msgs = getMessages(jid, limit, before);
+  const msgs = getMessagesForJids(primaryJid, alternateJid, limit, before);
   return { id: req.id, result: msgs.reverse() };
 }
 
@@ -425,9 +426,10 @@ async function cmdMarkRead(req: IpcRequest, params?: Record<string, unknown>): P
   if (!target) return { id: req.id, error: 'Missing target' };
 
   const jid = resolve(target);
-  const lastMsgs = getMessages(jid, 1);
+  const [primaryJid, alternateJid] = equivalentJids(jid);
+  const lastMsgs = getMessagesForJids(primaryJid, alternateJid, 1);
   if (lastMsgs.length > 0) {
-    await getSocket().readMessages([{ remoteJid: jid, id: lastMsgs[0].id }]);
+    await getSocket().readMessages([{ remoteJid: lastMsgs[0].chat_jid, id: lastMsgs[0].id }]);
   }
   return { id: req.id, result: { status: 'read', jid } };
 }

@@ -17,6 +17,7 @@ commands:
 
   context      AI orientation — account, aliases, recent chats  (alias: ctx)
   alias        Manage aliases (list|set|remove)
+  notify       Exocortex notifications (subscribe|unsubscribe|list; aliases: add/remove)
 
   chats        List all chats (sorted by recent)
   groups       List groups only
@@ -66,7 +67,7 @@ case "$cmd" in
         echo "Logged out. Auth credentials removed." ;;
     daemon)
         exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} daemon "$@" ;;
-    chats|groups|contacts|messages|msgs|search|s|send|media|typing|read|info|context|ctx|alias|sync)
+    chats|groups|contacts|messages|msgs|search|s|send|media|typing|read|info|context|ctx|alias|sync|notify)
         exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} "$cmd" "$@" ;;
     help|--help|-h)
         usage ;;

@@ -27,6 +27,7 @@ import {
   upsertContacts,
   kvSet,
   getKnownLidJids,
+  resolveDisplayName,
 } from './db.js';
 import {
   waMessageToStored,
@@ -37,6 +38,7 @@ import {
   getMessageEphemeralExpiration,
 } from './converters.js';
 import { ConnectionReadinessGate } from './readiness.js';
+import { publishIncomingMessageNotification, shouldPublishIncomingMessage } from './notifications.js';
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'conflict' | 'logged_out';
 
@@ -346,7 +348,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
 
     // ─── Real-time messages ────────────────────────────────
 
-    nextSock.ev.on('messages.upsert', ({ messages }) => {
+    nextSock.ev.on('messages.upsert', ({ messages, type }) => {
       if (!isCurrentSocket(socketId, nextSock)) return;
 
       for (const msg of messages) {
@@ -375,6 +377,19 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
           chat: stored.chat_jid,
           preview: stored.content.slice(0, 80),
         }, 'Message received');
+
+        // Baileys uses "notify" for live arrivals and "append" while catching
+        // up. Only publish stable, genuinely incoming platform events.
+        if (shouldPublishIncomingMessage({
+          upsertType: type,
+          rawChatJid,
+          platformMessageId: msg.key.id,
+          isFromMe: stored.is_from_me,
+        })) {
+          void publishIncomingMessageNotification(stored, resolveDisplayName(stored.chat_jid)).catch((err) => {
+            logger.warn({ err, messageId: stored.id, chat: stored.chat_jid }, 'Failed to publish incoming-message notification');
+          });
+        }
       }
     });
 

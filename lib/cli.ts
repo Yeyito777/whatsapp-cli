@@ -10,7 +10,14 @@ import path from 'path';
 
 import { sendCommand, isDaemonRunning } from './client.js';
 import { PROJECT_ROOT } from './paths.js';
-import { manageExternalToolDaemon } from './exocortex.js';
+import {
+  listExternalNotificationSubscriptions,
+  manageExternalToolDaemon,
+  subscribeExternalNotification,
+  unsubscribeExternalNotification,
+  type ExternalNotificationSubscription,
+} from './exocortex.js';
+import { INCOMING_MESSAGES_SOURCE, WHATSAPP_TOOL_NAME } from './notifications.js';
 import {
   formatChats,
   formatMessages,
@@ -53,6 +60,41 @@ function parseLimit(args: string[], fallback = 50): number {
     return parseInt(args[nIdx + 1]) || fallback;
   }
   return fallback;
+}
+
+function optionValue(args: string[], names: string[]): string | undefined {
+  for (const name of names) {
+    const index = args.indexOf(name);
+    if (index !== -1) {
+      const value = args[index + 1];
+      if (!value || value.startsWith('-')) die(`Missing value after ${name}`);
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function positionalValues(args: string[], start: number, optionsWithValues: string[]): string[] {
+  const values: string[] = [];
+  for (let i = start; i < args.length; i++) {
+    const arg = args[i];
+    if (optionsWithValues.includes(arg)) {
+      i++;
+      continue;
+    }
+    if (arg.startsWith('-')) die(`Unknown option: ${arg}`);
+    values.push(arg);
+  }
+  return values;
+}
+
+function formatNotificationSubscriptions(subscriptions: ExternalNotificationSubscription[]): string {
+  if (subscriptions.length === 0) return 'No incoming WhatsApp message notification subscriptions.';
+  return subscriptions.map(subscription => [
+    `${subscription.sourceLabel} → ${subscription.convId}`,
+    `  delivery: ${subscription.delivery}  ${subscription.enabled ? 'enabled' : 'disabled'}`,
+    `  id: ${subscription.id}`,
+  ].join('\n')).join('\n\n');
 }
 
 // ─── Commands ──────────────────────────────────────────────
@@ -350,6 +392,88 @@ async function cmdContext(_args: string[]): Promise<void> {
   output(ctx, (d) => formatContext(d as Parameters<typeof formatContext>[0]));
 }
 
+async function cmdNotify(args: string[]): Promise<void> {
+  const subcmd = args[0];
+  const usage = [
+    'Usage:',
+    '  whatsapp notify subscribe <conversation_id> [--delivery wake|inbox]  (alias: add)',
+    '  whatsapp notify unsubscribe <conversation_id>                       (alias: remove)',
+    '  whatsapp notify unsubscribe --id <subscription_id>',
+    '  whatsapp notify list [conversation_id]',
+  ].join('\n');
+
+  switch (subcmd) {
+    case 'subscribe':
+    case 'add': {
+      const positional = positionalValues(args, 1, ['--delivery']);
+      if (positional.length !== 1) die(usage);
+      const convId = positional[0];
+      const deliveryValue = optionValue(args, ['--delivery']) ?? 'wake';
+      if (deliveryValue !== 'wake' && deliveryValue !== 'inbox') {
+        die('--delivery must be wake or inbox');
+      }
+      const subscription = await subscribeExternalNotification({
+        toolName: WHATSAPP_TOOL_NAME,
+        sourceId: INCOMING_MESSAGES_SOURCE.id,
+        sourceLabel: INCOMING_MESSAGES_SOURCE.label,
+        sourceDescription: INCOMING_MESSAGES_SOURCE.description,
+        convId,
+        delivery: deliveryValue,
+      });
+      if (jsonMode) console.log(formatJson(subscription));
+      else console.log(`Subscribed ${subscription.sourceLabel} to ${subscription.convId} (${subscription.delivery}).`);
+      break;
+    }
+
+    case 'unsubscribe':
+    case 'remove': {
+      const subscriptionId = optionValue(args, ['--id', '--subscription-id']);
+      const positional = positionalValues(args, 1, ['--id', '--subscription-id', '--conv', '--conversation']);
+      if (positional.length > 1) die(usage);
+      const convOption = optionValue(args, ['--conv', '--conversation']);
+      if (convOption && positional.length > 0) die('Specify the conversation once, either positionally or with --conv');
+      const convId = convOption ?? positional[0];
+      if (subscriptionId && convId) die('Specify either a subscription ID or a conversation ID, not both');
+      if (!subscriptionId && !convId) die(usage);
+      const result = subscriptionId
+        ? await unsubscribeExternalNotification({ subscriptionId })
+        : await unsubscribeExternalNotification({
+            toolName: WHATSAPP_TOOL_NAME,
+            sourceId: INCOMING_MESSAGES_SOURCE.id,
+            convId,
+          });
+      if (jsonMode) console.log(formatJson(result));
+      else console.log(`Removed ${result.removed} notification subscription${result.removed === 1 ? '' : 's'}.`);
+      break;
+    }
+
+    case 'list':
+    case undefined: {
+      const positional = positionalValues(args, 1, ['--conv', '--conversation']);
+      if (positional.length > 1) die(usage);
+      const convOption = optionValue(args, ['--conv', '--conversation']);
+      if (convOption && positional.length > 0) die('Specify the conversation once, either positionally or with --conv');
+      const convId = convOption ?? positional[0];
+      const subscriptions = await listExternalNotificationSubscriptions({
+        toolName: WHATSAPP_TOOL_NAME,
+        sourceId: INCOMING_MESSAGES_SOURCE.id,
+        ...(convId ? { convId } : {}),
+      });
+      output(subscriptions, data => formatNotificationSubscriptions(data as ExternalNotificationSubscription[]));
+      break;
+    }
+
+    case 'help':
+    case '--help':
+    case '-h':
+      console.log(usage);
+      break;
+
+    default:
+      die(`Unknown notify command: ${subcmd}\n${usage}`);
+  }
+}
+
 // ─── Main ──────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -380,6 +504,7 @@ async function main(): Promise<void> {
       case 'info':      await cmdInfo(cmdArgs); break;
       case 'sync':      await cmdSync(cmdArgs); break;
       case 'alias':     await cmdAlias(cmdArgs); break;
+      case 'notify':    await cmdNotify(cmdArgs); break;
       case 'context':
       case 'ctx':       await cmdContext(cmdArgs); break;
       default:

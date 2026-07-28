@@ -38,7 +38,12 @@ import {
   getMessageEphemeralExpiration,
 } from './converters.js';
 import { ConnectionReadinessGate } from './readiness.js';
-import { publishIncomingMessageNotification, shouldPublishIncomingMessage } from './notifications.js';
+import {
+  publishIncomingMessageNotification,
+  publishOwnerAiCommandNotification,
+  shouldPublishIncomingMessage,
+  shouldPublishOwnerAiCommand,
+} from './notifications.js';
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'conflict' | 'logged_out';
 
@@ -388,6 +393,21 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
         })) {
           void publishIncomingMessageNotification(stored, resolveDisplayName(stored.chat_jid)).catch((err) => {
             logger.warn({ err, messageId: stored.id, chat: stored.chat_jid }, 'Failed to publish incoming-message notification');
+          });
+        } else if (shouldPublishOwnerAiCommand({
+          upsertType: type,
+          rawChatJid,
+          platformMessageId: msg.key.id,
+          isFromMe: stored.is_from_me,
+          ownerJid: nextSock.user?.id,
+          content: stored.content || stored.media_caption || '',
+        })) {
+          void publishOwnerAiCommandNotification(
+            stored,
+            nextSock.user!.id,
+            resolveDisplayName(stored.chat_jid),
+          ).catch((err) => {
+            logger.warn({ err, messageId: stored.id, chat: stored.chat_jid }, 'Failed to publish owner /ai command notification');
           });
         }
       }

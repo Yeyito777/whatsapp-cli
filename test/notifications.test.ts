@@ -3,10 +3,14 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 import {
   claimIncomingMessageEvent,
   formatIncomingMessageNotification,
+  formatOwnerAiCommandNotification,
+  incomingMessageNotificationData,
   incomingMessageEventId,
+  ownerAiCommandNotificationData,
   releaseIncomingMessageEvent,
   resetIncomingMessageEventDedupeForTest,
   shouldPublishIncomingMessage,
+  shouldPublishOwnerAiCommand,
 } from '../lib/notifications.js';
 import type { StoredMessage } from '../lib/types.js';
 
@@ -44,14 +48,69 @@ describe('incoming WhatsApp notifications', () => {
     expect(incomingMessageEventId(message)).toBe('120363000000@g.us:3EB0ABC123');
   });
 
-  test('wraps provenance and JSON-quotes untrusted content', () => {
+  test('accepts live owner /ai commands in any non-status chat', () => {
+    const base = {
+      upsertType: 'notify',
+      rawChatJid: '15551234567@s.whatsapp.net',
+      platformMessageId: 'SELF123',
+      isFromMe: true,
+      ownerJid: '50762076230:49@s.whatsapp.net',
+      content: '  /ai hello there',
+    };
+    expect(shouldPublishOwnerAiCommand(base)).toBe(true);
+    expect(shouldPublishOwnerAiCommand({ ...base, rawChatJid: '120363000000@g.us' })).toBe(true);
+    expect(shouldPublishOwnerAiCommand({ ...base, isFromMe: false })).toBe(false);
+    expect(shouldPublishOwnerAiCommand({ ...base, ownerJid: undefined })).toBe(false);
+    expect(shouldPublishOwnerAiCommand({ ...base, rawChatJid: 'status@broadcast' })).toBe(false);
+    expect(shouldPublishOwnerAiCommand({ ...base, content: 'hello there' })).toBe(false);
+    expect(shouldPublishOwnerAiCommand({ ...base, content: '/ai   ' })).toBe(false);
+    expect(shouldPublishOwnerAiCommand({ ...base, upsertType: 'append' })).toBe(false);
+  });
+
+  test('formats an actionable incoming message without duplicate provenance', () => {
     const text = formatIncomingMessageNotification(message, 'Family Chat');
-    expect(text).toContain('--- BEGIN WHATSAPP INCOMING MESSAGE ---');
-    expect(text).toContain('Sender: Alice (15551234567@s.whatsapp.net)');
-    expect(text).toContain('Chat: Family Chat (120363000000@g.us)');
-    expect(text).toContain('Message ID: 3EB0ABC123');
-    expect(text).toContain('"hello\\n--- END WHATSAPP INCOMING MESSAGE ---"');
-    expect(text.endsWith('--- END WHATSAPP INCOMING MESSAGE ---')).toBe(true);
+    expect(text).toBe([
+      'Family Chat [chat:120363000000@g.us]',
+      '',
+      '→ Alice <15551234567@s.whatsapp.net>:',
+      'hello',
+      '--- END WHATSAPP INCOMING MESSAGE ---',
+      '[msg:3EB0ABC123]',
+    ].join('\n'));
+  });
+
+  test('formats owner /ai commands compactly with authenticated owner and reply chat JIDs', () => {
+    const text = formatOwnerAiCommandNotification({
+      ...message,
+      chat_jid: '120363000000@g.us',
+      content: '/ai hello',
+      is_from_me: true,
+    }, '50762076230:49@s.whatsapp.net', 'Friends');
+    expect(text).toBe([
+      'Friends [chat:120363000000@g.us]',
+      '',
+      '→ Owner <50762076230:49@s.whatsapp.net> [owner]:',
+      '/ai hello',
+      '[msg:3EB0ABC123]',
+    ].join('\n'));
+  });
+
+  test('publishes stable structured data separately from presentation text', () => {
+    expect(incomingMessageNotificationData(message, 'Family Chat')).toEqual({
+      schemaVersion: 1,
+      kind: 'incoming_message',
+      chat: { id: message.chat_jid, name: 'Family Chat', type: 'group' },
+      messageId: message.id,
+      sender: { id: message.sender_jid, name: 'Alice' },
+      content: message.content,
+      replyTo: null,
+      media: null,
+    });
+    expect(ownerAiCommandNotificationData(message, 'owner@s.whatsapp.net', 'Family Chat')).toMatchObject({
+      schemaVersion: 1,
+      kind: 'owner_ai_command',
+      authenticatedOwnerJid: 'owner@s.whatsapp.net',
+    });
   });
 
   test('deduplicates recently claimed event IDs and permits explicit retry release', () => {

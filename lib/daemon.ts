@@ -14,7 +14,7 @@ import { CONFIG_DIR, RUNTIME_DIR, SOCKET_PATH, PID_FILE, LOG_FILE } from './path
 import { getDb } from './db.js';
 import { connectWhatsApp, getSocket, prepareForShutdown } from './connection.js';
 import { handleCommand, initHandlers } from './handlers.js';
-import { registerIncomingMessagesSource } from './notifications.js';
+import { registerIncomingMessagesSource, registerOwnerAiCommandsSource } from './notifications.js';
 import type { IpcRequest } from './types.js';
 
 // ─── Logger ────────────────────────────────────────────────
@@ -115,13 +115,15 @@ async function main(): Promise<void> {
   const server = startIpcServer();
   registerShutdown(server);
 
-  try {
-    const source = await registerIncomingMessagesSource();
-    logger.info({ source: `${source.toolName}/${source.id}` }, 'Registered Exocortex notification source');
-  } catch (err) {
-    // WhatsApp remains usable if exocortexd is temporarily unavailable; a
-    // supervised restart will announce the source again.
-    logger.warn({ err }, 'Could not register Exocortex notification source');
+  for (const registerSource of [registerIncomingMessagesSource, registerOwnerAiCommandsSource]) {
+    try {
+      const source = await registerSource();
+      logger.info({ source: `${source.toolName}/${source.id}` }, 'Registered Exocortex notification source');
+    } catch (err) {
+      // WhatsApp remains usable if exocortexd is temporarily unavailable; a
+      // supervised restart will announce the source again.
+      logger.warn({ err }, 'Could not register Exocortex notification source');
+    }
   }
 
   await connectWhatsApp(logger);

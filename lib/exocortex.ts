@@ -146,6 +146,7 @@ interface PublishExternalNotificationCommand extends ExocortexIpcCommand {
   eventId: string;
   text: string;
   occurredAt?: number;
+  data?: Record<string, unknown>;
 }
 
 interface ExternalNotificationPublishResultEvent extends ExocortexIpcEvent, ExternalNotificationPublishResult {

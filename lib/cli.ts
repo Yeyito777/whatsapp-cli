@@ -19,6 +19,12 @@ import {
 } from './exocortex.js';
 import { INCOMING_MESSAGES_SOURCE, WHATSAPP_TOOL_NAME } from './notifications.js';
 import {
+  PayloadUsageError,
+  decodeExactUtf8,
+  parseSendStructure,
+  readStdinBytes,
+} from './payload.js';
+import {
   formatChats,
   formatMessages,
   formatContacts,
@@ -208,47 +214,46 @@ async function cmdSearch(args: string[]): Promise<void> {
 }
 
 async function cmdSend(args: string[]): Promise<void> {
-  requireDaemon();
-  const target = args[0];
-  if (!target) die('Usage: whatsapp send <name_or_jid> "message"\n       whatsapp send <name_or_jid> ["caption" | --caption "caption"] --file <path>');
+  const help = [
+    'usage:',
+    '  whatsapp send <target> [--reply <message_id>]',
+    '  whatsapp send <target> --file <path>',
+    '',
+    'Message text is required as exact UTF-8 on stdin.',
+    'With --file, stdin is the optional exact caption; empty stdin sends no caption.',
+    'Inline text and --caption are not accepted.',
+  ].join('\n');
+  if (args.includes('-h') || args.includes('--help')) {
+    console.log(help);
+    return;
+  }
 
-  // --file mode
-  const fileIdx = args.indexOf('--file');
-  if (fileIdx !== -1) {
-    const filePath = args[fileIdx + 1];
-    if (!filePath) die('Missing file path after --file');
+  const structure = parseSendStructure(args);
+  const stdin = await readStdinBytes();
 
-    let caption: string | undefined;
-    const captionIdx = args.indexOf('--caption');
-    if (captionIdx !== -1) {
-      caption = args[captionIdx + 1];
-      if (!caption) die('Missing caption text after --caption');
-    } else {
-      caption = args.slice(1, fileIdx).join(' ') || undefined;
-    }
-
-    const result = await sendCommand('send_file', { target, file: path.resolve(filePath), caption });
+  if (structure.file) {
+    const caption = decodeExactUtf8(stdin, 'file caption', { required: false });
+    requireDaemon();
+    const result = await sendCommand('send_file', {
+      target: structure.target,
+      file: path.resolve(structure.file),
+      ...(caption !== undefined ? { caption } : {}),
+    });
     if (jsonMode) {
       console.log(formatJson(result));
     } else {
-      console.log(`Sent file to ${target}`);
+      console.log(`Sent file to ${structure.target}`);
     }
     return;
   }
 
-  // --reply mode
-  let replyTo: string | undefined;
-  const replyIdx = args.indexOf('--reply');
-  if (replyIdx !== -1) {
-    replyTo = args[replyIdx + 1];
-    if (!replyTo) die('Missing message ID after --reply');
-    args.splice(replyIdx, 2);
-  }
-
-  const text = args.slice(1).join(' ');
-  if (!text) die('Usage: whatsapp send <name_or_jid> "message"');
-
-  const result = await sendCommand('send', { target, text, reply_to: replyTo });
+  const text = decodeExactUtf8(stdin, 'message text')!;
+  requireDaemon();
+  const result = await sendCommand('send', {
+    target: structure.target,
+    text,
+    reply_to: structure.replyTo,
+  });
   if (jsonMode) {
     console.log(formatJson(result));
   } else {
@@ -515,7 +520,7 @@ async function main(): Promise<void> {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`Error: ${message}`);
-    process.exit(1);
+    process.exit(err instanceof PayloadUsageError ? 2 : 1);
   }
 }
 

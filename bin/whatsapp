@@ -27,7 +27,7 @@ commands:
   info         Group details + participants
   sync         Force-sync group metadata
 
-  send         Send a message (text, file, or reply)
+  send         Send stdin text, a file with optional stdin caption, or a reply
   media        Media operations (download)
   typing       Show/hide typing indicator
   read         Mark chat as read
@@ -36,6 +36,9 @@ flags:
   --json       JSON output (any command)
 
 target: alias ("Mom"), phone number (1415...), JID, or chat name.
+
+payload input: send reads exact UTF-8 message text or file captions from stdin.
+Inline message/caption arguments are not accepted.
 
 Run 'whatsapp <command> --help' for command-specific usage.
 EOF

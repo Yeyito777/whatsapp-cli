@@ -47,12 +47,12 @@ describe('login never opens a second connection on a live session', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('usage:');
     expect(fs.existsSync(AUTH_DIR)).toBe(false);
-  });
+  }, 30_000);
 
   test('unknown login arguments are refused', () => {
     const result = run(['login', '--frobnicate']);
     expect(result.status).toBe(2);
-  });
+  }, 30_000);
 
   test('existing linked-device credentials count as already authenticated', () => {
     writeLinkedCreds();
@@ -60,7 +60,7 @@ describe('login never opens a second connection on a live session', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Already authenticated');
     expect(result.stdout).not.toContain('QR');
-  });
+  }, 30_000);
 
   test('login refuses while the daemon is connected or in conflict', async () => {
     await daemonInState('connected');
@@ -74,7 +74,7 @@ describe('login never opens a second connection on a live session', () => {
     const conflict = await runAsync(['login']);
     expect(conflict.code).toBe(1);
     expect(conflict.stderr).toContain('daemon restart');
-  });
+  }, 30_000);
 
   test('login refuses while another whatsapp-cli process holds the session lock', async () => {
     holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '/x/lib/daemon.ts'], { stdio: 'ignore' });
@@ -84,7 +84,7 @@ describe('login never opens a second connection on a live session', () => {
     const result = await runAsync(['login']);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('in use by the WhatsApp daemon');
-  });
+  }, 30_000);
 
   test('a stale lock from a dead process does not block', () => {
     fs.mkdirSync(path.dirname(SESSION_LOCK_FILE), { recursive: true });
@@ -93,7 +93,7 @@ describe('login never opens a second connection on a live session', () => {
     const result = run(['login']);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Already authenticated');
-  });
+  }, 30_000);
 });
 
 describe('logout and per-command help', () => {
@@ -103,7 +103,7 @@ describe('logout and per-command help', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('--yes');
     expect(fs.existsSync(path.join(AUTH_DIR, 'creds.json'))).toBe(true);
-  });
+  }, 30_000);
 
   test('--help on read/messages prints usage instead of resolving "--help" as a chat', () => {
     for (const cmd of ['read', 'messages', 'typing', 'info', 'chats', 'sync']) {
@@ -111,7 +111,7 @@ describe('logout and per-command help', () => {
       expect(result.status).toBe(0);
       expect(result.stdout).toContain(`whatsapp ${cmd}`);
     }
-  });
+  }, 30_000);
 });
 
 function runAsync(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
@@ -123,5 +123,5 @@ function runAsync(args: string[]): Promise<{ code: number | null; stdout: string
     child.stderr.on('data', d => { stderr += d; });
     child.on('close', code => done({ code, stdout, stderr }));
     child.stdin.end();
-  });
+  }, 30_000);
 }

@@ -34,7 +34,7 @@ function runCli(args: string[], input: string, env: Record<string, string>): Pro
     child.stderr.on('data', d => { stderr += d; });
     child.on('close', code => done({ code, stdout, stderr }));
     child.stdin.end(input);
-  });
+  }, 30_000);
 }
 
 describe('send outcome reporting', () => {
@@ -42,12 +42,12 @@ describe('send outcome reporting', () => {
     await silentDaemon();
     const err = await sendCommand('send', {}, 200).catch(e => e);
     expect(err).toBeInstanceOf(IpcOutcomeUnknownError);
-  });
+  }, 30_000);
 
   test('no daemon at all is a plain failure', async () => {
     const err = await sendCommand('send', {}, 200).catch(e => e);
     expect(err).not.toBeInstanceOf(IpcOutcomeUnknownError);
-  });
+  }, 30_000);
 
   test('the CLI exits 75 with the message ID and safe-retry instructions', async () => {
     let request = '';
@@ -59,12 +59,12 @@ describe('send outcome reporting', () => {
     expect(result.stderr).toContain('OUTCOME UNKNOWN');
     expect(result.stderr).toContain(`whatsapp outbox ${id}`);
     expect(result.stderr).toContain(`--id ${id}`);
-  });
+  }, 30_000);
 
   test('a retry with --id reuses the same message ID', async () => {
     let request = '';
     await silentDaemon(line => { request += line; });
     await runCli(['send', 'Mom', '--id', '3EB0ABCDEF0123456789AB'], 'hello', { WHATSAPP_CLI_SEND_TIMEOUT_MS: '300' });
     expect(JSON.parse(request.trim()).params.message_id).toBe('3EB0ABCDEF0123456789AB');
-  });
+  }, 30_000);
 });

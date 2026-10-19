@@ -117,9 +117,14 @@ export function formatMessages(messages: StoredMessage[], chat?: ResolvedChatSum
     const sender = senderLabel(msg);
     const media = mediaIcon(msg.media_type);
     const reply = msg.quoted_id ? '↩ ' : '';
-    const content = msg.content || (msg.media_type ? `[${msg.media_type}]` : '');
+    const content = msg.deleted_at
+      ? '[deleted]'
+      : (msg.content || (msg.media_type ? `[${msg.media_type}]` : '')) + (msg.edited_at ? ' (edited)' : '');
 
-    lines.push(`[${time}] ${reply}${sender}: ${media}${content}`);
+    lines.push(`[${time}] ${reply}${sender}: ${msg.deleted_at ? '' : media}${content}`);
+    if (msg.reactions?.length) {
+      lines.push(`  reactions: ${msg.reactions.map(r => `${r.emoji} ${r.from_name}`).join(', ')}`);
+    }
     lines.push(`  id: ${msg.id}`);
   }
 

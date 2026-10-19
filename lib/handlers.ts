@@ -20,6 +20,7 @@ import {
   kvGet,
   getChatEphemeralExpiration,
   hasLocalChat,
+  getReactionsForMessages,
   getMessageInChat,
   getLatestIncomingMessage,
   getAllAliases,
@@ -30,7 +31,7 @@ import {
 } from './db.js';
 import { describeMatch, resolveTarget, type ResolvedTarget } from './resolve.js';
 import { getSocket, getConnectionStatus, isConnected, logoutSession, waitForConnection } from './connection.js';
-import { deserializeRawMessage, equivalentJids, waMessageToStored } from './converters.js';
+import { deserializeRawMessage, equivalentJids, getOwnJid, waMessageToStored } from './converters.js';
 import {
   advanceOutbox,
   generateOutgoingMessageId,
@@ -187,8 +188,26 @@ function cmdMessages(req: IpcRequest, params?: Record<string, unknown>): IpcResp
   const [primaryJid, alternateJid] = equivalentJids(resolved.jid);
   const limit = (params?.limit as number) || 50;
   const before = params?.before as string | undefined;
-  const msgs = getMessagesForJids(primaryJid, alternateJid, limit, before);
-  return { id: req.id, result: { chat: targetSummary(resolved), messages: msgs.reverse() } };
+  const msgs = getMessagesForJids(primaryJid, alternateJid, limit, before).reverse();
+  attachReactions(resolved.jid, msgs);
+  return { id: req.id, result: { chat: targetSummary(resolved), messages: msgs } };
+}
+
+function attachReactions(chatJid: string, messages: StoredMessage[]): void {
+  const reactions = getReactionsForMessages(chatJid, messages.map(m => m.id));
+  if (reactions.length === 0) return;
+  const own = getOwnJid();
+  const byMessage = new Map<string, StoredMessage['reactions']>();
+  for (const r of reactions) {
+    const fromMe = Boolean(own && r.reactor_jid === own);
+    const list = byMessage.get(r.message_id) ?? [];
+    list.push({ emoji: r.emoji, from_jid: r.reactor_jid, from_name: fromMe ? 'You' : resolveDisplayName(r.reactor_jid), from_me: fromMe });
+    byMessage.set(r.message_id, list);
+  }
+  for (const m of messages) {
+    const list = byMessage.get(m.id);
+    if (list) m.reactions = list;
+  }
 }
 
 function cmdSearch(req: IpcRequest, params?: Record<string, unknown>): IpcResponse {

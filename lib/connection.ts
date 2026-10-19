@@ -46,6 +46,14 @@ import {
   onNewLidMapping,
   setOwnJid,
 } from './converters.js';
+import {
+  applyHistoryMutations,
+  applyMessageUpdates,
+  applyReactions,
+  type HistoryMessageLike,
+  type MessageUpdateLike,
+  type ReactionEventLike,
+} from './mutations.js';
 import { backupDatabaseOnce, mergeLidIdentity, repairStoredIdentities } from './migrations.js';
 import { ConnectionReadinessGate } from './readiness.js';
 import { backoffDelay, decideOnClose, NETWORK_BACKOFF } from './reconnect-policy.js';
@@ -491,6 +499,8 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
 
     nextSock.ev.on('messages.update', (updates) => {
       if (!isCurrentSocket(socketId, nextSock)) return;
+      const applied = applyMessageUpdates(updates as MessageUpdateLike[]);
+      if (applied.edited || applied.deleted) logger.debug(applied, 'Applied message edits/deletes');
       for (const { key, update } of updates) {
         if (!key?.id || !key.fromMe || update.status == null) continue;
         const state = stateForBaileysStatus(update.status);
@@ -500,6 +510,11 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
           : null;
         advanceOutbox(key.id, state, detail);
       }
+    });
+
+    nextSock.ev.on('messages.reaction', (reactions) => {
+      if (!isCurrentSocket(socketId, nextSock)) return;
+      applyReactions(reactions as ReactionEventLike[]);
     });
 
     nextSock.ev.on('message-receipt.update', (receipts) => {
@@ -533,6 +548,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
       }
 
       if (messages.length > 0) {
+        applyHistoryMutations(messages as HistoryMessageLike[]);
         const stored = messages
           .map(waMessageToStored)
           .filter((m): m is NonNullable<typeof m> => m !== null);
@@ -557,9 +573,13 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
         }
 
         const stored = waMessageToStored(msg);
-        if (!stored) continue;
+        if (!stored) {
+          applyHistoryMutations([msg as HistoryMessageLike]);
+          continue;
+        }
 
         upsertMessage(stored);
+        applyHistoryMutations([msg as HistoryMessageLike]);
 
         upsertChat({
           jid: stored.chat_jid,

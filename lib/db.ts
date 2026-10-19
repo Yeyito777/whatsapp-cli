@@ -91,6 +91,18 @@ function initSchema(): void {
   ensureColumn('messages', 'media_file_name', 'TEXT');
   ensureColumn('messages', 'media_mime_type', 'TEXT');
   ensureColumn('chats', 'ephemeral_expiration', 'INTEGER');
+  ensureColumn('messages', 'edited_at', 'TEXT');
+  ensureColumn('messages', 'deleted_at', 'TEXT');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reactions (
+      chat_jid TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      reactor_jid TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      PRIMARY KEY (chat_jid, message_id, reactor_jid)
+    );
+  `);
 }
 
 function ensureColumn(table: 'messages' | 'chats', column: string, definition: string): void {
@@ -171,21 +183,21 @@ function prepareStatements(): void {
     `),
 
     getMessages: db.prepare(
-      `SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, media_type, media_caption, quoted_id
+      `SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, media_type, media_caption, quoted_id, edited_at, deleted_at
        FROM messages
        WHERE chat_jid = ? OR chat_jid = ?
        ORDER BY timestamp DESC
        LIMIT ?`
     ),
     getMessagesBefore: db.prepare(
-      `SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, media_type, media_caption, quoted_id
+      `SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, media_type, media_caption, quoted_id, edited_at, deleted_at
        FROM messages
        WHERE (chat_jid = ? OR chat_jid = ?) AND timestamp < ?
        ORDER BY timestamp DESC
        LIMIT ?`
     ),
     searchMessages: db.prepare(
-      `SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, media_type, media_caption, quoted_id
+      `SELECT id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, media_type, media_caption, quoted_id, edited_at, deleted_at
        FROM messages
        WHERE content LIKE ?
        ORDER BY timestamp DESC
@@ -514,4 +526,62 @@ export function kvSet(key: string, value: string): void {
 
 export function kvDelete(key: string): void {
   getDb().prepare('DELETE FROM kv WHERE key = ?').run(key);
+}
+
+// ─── Edits, deletes, reactions ─────────────────────────────
+
+/** Replace a message's text after an edit. Returns whether a stored message changed. */
+export function applyMessageEdit(chatJid: string, messageId: string, content: string, editedAt: string): boolean {
+  const [primary, alternate] = equivalentJids(chatJid);
+  return getDb().prepare(`
+    UPDATE messages SET
+      content = @content,
+      media_caption = CASE WHEN media_type IS NOT NULL THEN @content ELSE media_caption END,
+      edited_at = @editedAt
+    WHERE id = @id AND chat_jid IN (@primary, @alternate) AND deleted_at IS NULL
+  `).run({ content, editedAt, id: messageId, primary, alternate }).changes > 0;
+}
+
+/** Deleted for everyone: drop the text and media keys, keep a tombstone. */
+export function applyMessageRevoke(chatJid: string, messageId: string, deletedAt: string): boolean {
+  const [primary, alternate] = equivalentJids(chatJid);
+  const changed = getDb().prepare(`
+    UPDATE messages SET content = '', media_caption = NULL, raw_message_json = NULL, deleted_at = @deletedAt
+    WHERE id = @id AND chat_jid IN (@primary, @alternate) AND deleted_at IS NULL
+  `).run({ deletedAt, id: messageId, primary, alternate }).changes > 0;
+  getDb().prepare('DELETE FROM reactions WHERE message_id = ? AND chat_jid IN (?, ?)').run(messageId, primary, alternate);
+  return changed;
+}
+
+/** One reaction per reactor per message; an empty emoji removes it. */
+export function setReaction(chatJid: string, messageId: string, reactorJid: string, emoji: string, timestamp: string): void {
+  if (!emoji) {
+    getDb().prepare('DELETE FROM reactions WHERE chat_jid = ? AND message_id = ? AND reactor_jid = ?').run(chatJid, messageId, reactorJid);
+    return;
+  }
+  getDb().prepare(`
+    INSERT INTO reactions (chat_jid, message_id, reactor_jid, emoji, timestamp)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(chat_jid, message_id, reactor_jid) DO UPDATE SET
+      emoji = CASE WHEN excluded.timestamp >= reactions.timestamp THEN excluded.emoji ELSE reactions.emoji END,
+      timestamp = MAX(excluded.timestamp, reactions.timestamp)
+  `).run(chatJid, messageId, reactorJid, emoji, timestamp);
+}
+
+export interface StoredReaction {
+  message_id: string;
+  reactor_jid: string;
+  emoji: string;
+  timestamp: string;
+}
+
+export function getReactionsForMessages(chatJid: string, messageIds: string[]): StoredReaction[] {
+  if (messageIds.length === 0) return [];
+  const [primary, alternate] = equivalentJids(chatJid);
+  const placeholders = messageIds.map(() => '?').join(', ');
+  return getDb().prepare(`
+    SELECT message_id, reactor_jid, emoji, timestamp FROM reactions
+    WHERE chat_jid IN (?, ?) AND message_id IN (${placeholders})
+    ORDER BY timestamp
+  `).all(primary, alternate, ...messageIds) as StoredReaction[];
 }

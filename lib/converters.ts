@@ -113,11 +113,7 @@ export function waMessageToStored(msg: proto.IWebMessageInfo): StoredMessage | n
   const chatJid = translateJid(rawJid);
   const media = getMediaInfo(normalized);
 
-  const content =
-    normalized.conversation ||
-    normalized.extendedTextMessage?.text ||
-    media.caption ||
-    '';
+  const content = messageText(normalized);
 
   // Skip protocol messages with no useful content
   if (!content && !media.type) return null;
@@ -151,6 +147,16 @@ export function waMessageToStored(msg: proto.IWebMessageInfo): StoredMessage | n
     media_file_name: media.fileName,
     media_mime_type: media.mimeType,
   };
+}
+
+/** The visible text of a message: body or media caption. */
+export function messageText(message: proto.IMessage | null | undefined): string {
+  const normalized = normalizeMessageContent(message ?? undefined);
+  if (!normalized) return '';
+  return normalized.conversation ||
+    normalized.extendedTextMessage?.text ||
+    getMediaInfo(normalized).caption ||
+    '';
 }
 
 /**

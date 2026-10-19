@@ -25,12 +25,24 @@ export interface StoredMessage {
   media_type: string | null;
   media_caption: string | null;
   quoted_id: string | null;
+  /** Set when the sender edited the message (content is the latest version). */
+  edited_at?: string | null;
+  /** Set when the sender deleted it for everyone (content is then empty). */
+  deleted_at?: string | null;
+  reactions?: MessageReaction[];
 
   // Internal persistence fields. These are written to the DB when available,
   // but intentionally omitted from normal CLI list/search output.
   raw_message_json?: string | null;
   media_file_name?: string | null;
   media_mime_type?: string | null;
+}
+
+export interface MessageReaction {
+  emoji: string;
+  from_jid: string;
+  from_name: string;
+  from_me: boolean;
 }
 
 export interface StoredChat {
@@ -118,6 +130,8 @@ export interface MessageRow {
   media_type: string | null;
   media_caption: string | null;
   quoted_id: string | null;
+  edited_at?: string | null;
+  deleted_at?: string | null;
   raw_message_json?: string | null;
   media_file_name?: string | null;
   media_mime_type?: string | null;
@@ -150,6 +164,8 @@ export function messageFromRow(row: MessageRow): StoredMessage {
     media_type: row.media_type,
     media_caption: row.media_caption,
     quoted_id: row.quoted_id,
+    edited_at: row.edited_at ?? null,
+    deleted_at: row.deleted_at ?? null,
   };
 }
 

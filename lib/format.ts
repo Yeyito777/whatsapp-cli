@@ -5,6 +5,7 @@
  * the caller provides a resolver function.
  */
 import type { StoredMessage, StoredChat, StoredContact, Alias, DaemonStatus, GroupInfo } from './types.js';
+import { jidLabel, jidUser } from './jid.js';
 
 // ─── Helpers ───────────────────────────────────────────────
 
@@ -54,12 +55,18 @@ function mediaIcon(mediaType?: string | null): string {
   }
 }
 
-/** Best human-readable label for a JID. */
-function jidLabel(jid: string): string {
-  const user = jid.split('@')[0];
-  // If it looks like a phone number, format it
-  if (/^\d{7,15}$/.test(user)) return `+${user}`;
-  return user;
+/** Sender label; old rows stored raw ID digits as the name, so fall back to the JID label. */
+function senderLabel(msg: StoredMessage): string {
+  if (msg.is_from_me) return 'You';
+  const name = msg.sender_name?.trim();
+  if (name && name !== jidUser(msg.sender_jid)) return name;
+  return msg.sender_jid ? jidLabel(msg.sender_jid) : name || '?';
+}
+
+export interface ResolvedChatSummary {
+  jid: string;
+  name: string;
+  match: string;
 }
 
 // ─── Chat List ─────────────────────────────────────────────
@@ -88,10 +95,14 @@ export function formatChats(chats: StoredChat[]): string {
 
 // ─── Messages ──────────────────────────────────────────────
 
-export function formatMessages(messages: StoredMessage[]): string {
-  if (messages.length === 0) return 'No messages.';
-
+export function formatMessages(messages: StoredMessage[], chat?: ResolvedChatSummary): string {
   const lines: string[] = [];
+  if (chat) lines.push(`Chat: ${chat.name} <${chat.jid}> (matched by ${chat.match})`);
+  if (messages.length === 0) {
+    lines.push('No messages.');
+    return lines.join('\n');
+  }
+
   let lastDate = '';
 
   for (const msg of messages) {
@@ -103,7 +114,7 @@ export function formatMessages(messages: StoredMessage[]): string {
     }
 
     const time = shortTime(msg.timestamp);
-    const sender = msg.is_from_me ? 'You' : msg.sender_name;
+    const sender = senderLabel(msg);
     const media = mediaIcon(msg.media_type);
     const reply = msg.quoted_id ? '↩ ' : '';
     const content = msg.content || (msg.media_type ? `[${msg.media_type}]` : '');
@@ -147,7 +158,7 @@ export function formatSearchResults(
   const lines: string[] = [];
   for (const msg of messages) {
     const time = shortTime(msg.timestamp);
-    const sender = msg.is_from_me ? 'You' : msg.sender_name;
+    const sender = senderLabel(msg);
     const chatLabel = chatNames?.[msg.chat_jid] || jidLabel(msg.chat_jid);
     lines.push(`[${time}] ${sender} in ${chatLabel}`);
     lines.push(`  ${truncate(msg.content, 120)}`);

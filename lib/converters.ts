@@ -7,6 +7,7 @@
 import { normalizeMessageContent, proto } from '@whiskeysockets/baileys';
 
 import type { StoredMessage, StoredChat, StoredContact } from './types.js';
+import { jidLabel } from './jid.js';
 
 // ─── JID Translation ───────────────────────────────────────
 
@@ -23,6 +24,12 @@ export function registerLidMapping(lid: string, phone: string): void {
   phoneToLidMap[phoneUser] = `${lidUser}@lid`;
 }
 
+/** True when `user` (bare digits) is a known Linked Identity, not a phone number. */
+export function isKnownLidUser(user: string): boolean {
+  return Object.prototype.hasOwnProperty.call(lidToPhoneMap, user);
+}
+
+/** Phone JID for a LID when the mapping is known; otherwise the input. */
 export function translateJid(jid: string): string {
   if (!jid.endsWith('@lid')) return jid;
   const lidUser = jid.split('@')[0].split(':')[0];
@@ -67,7 +74,7 @@ export function waMessageToStored(msg: proto.IWebMessageInfo): StoredMessage | n
   const quotedId = normalized.extendedTextMessage?.contextInfo?.stanzaId || null;
 
   const sender = msg.key?.participant || msg.key?.remoteJid || '';
-  const senderName = msg.pushName || sender.split('@')[0];
+  const senderName = msg.pushName || jidLabel(sender);
 
   const timestamp = msg.messageTimestamp
     ? new Date(Number(msg.messageTimestamp) * 1000).toISOString()
@@ -256,25 +263,4 @@ export function baileysContactToStored(c: { id: string; name?: string | null; no
     notify: c.notify || '',
     phone: c.phoneNumber || c.id.split('@')[0] || '',
   };
-}
-
-// ─── JID Resolution ────────────────────────────────────────
-
-/**
- * Resolve a user-provided target (name, phone number, or JID) to a JID.
- * Needs a name→jid lookup function injected to avoid circular deps with db.
- */
-export function resolveJid(target: string, findByName: (name: string) => string | undefined): string {
-  // Already a JID
-  if (target.includes('@')) return target;
-
-  // Phone number → JID
-  const digits = target.replace(/[\s\-\+\(\)]/g, '');
-  if (/^\d{7,15}$/.test(digits)) return `${digits}@s.whatsapp.net`;
-
-  // Name lookup
-  const jid = findByName(target);
-  if (jid) return jid;
-
-  throw new Error(`Cannot resolve "${target}" to a WhatsApp JID. Use a phone number or exact chat name.`);
 }

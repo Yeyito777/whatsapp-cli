@@ -12,6 +12,8 @@ import type {
   StoredMediaMessage,
 } from './types.js';
 import { messageFromRow, chatFromRow, mediaMessageFromRow } from './types.js';
+import { equivalentJids } from './converters.js';
+import { isPhoneJid, jidLabel } from './jid.js';
 
 // ─── Initialization ────────────────────────────────────────
 
@@ -112,8 +114,6 @@ let stmts: {
   allChats: Database.Statement;
   groups: Database.Statement;
   chatCount: Database.Statement;
-  chatByNameExact: Database.Statement;
-  chatByNameFuzzy: Database.Statement;
   upsertContact: Database.Statement;
   allContacts: Database.Statement;
   kvGet: Database.Statement;
@@ -124,10 +124,6 @@ let stmts: {
   deleteAlias: Database.Statement;
   allAliases: Database.Statement;
   aliasByJid: Database.Statement;
-  aliasByNameExact: Database.Statement;
-  aliasByNameFuzzy: Database.Statement;
-  contactByNameExact: Database.Statement;
-  contactByNameFuzzy: Database.Statement;
   contactByJid: Database.Statement;
 };
 
@@ -228,12 +224,6 @@ function prepareStatements(): void {
       `SELECT * FROM chats WHERE is_group = 1 ORDER BY last_message_time DESC`
     ),
     chatCount: db.prepare('SELECT COUNT(*) as c FROM chats'),
-    chatByNameExact: db.prepare(
-      `SELECT * FROM chats WHERE LOWER(name) = LOWER(?) LIMIT 1`
-    ),
-    chatByNameFuzzy: db.prepare(
-      `SELECT * FROM chats WHERE LOWER(name) LIKE LOWER(?) ORDER BY last_message_time DESC LIMIT 1`
-    ),
     chatNameByJid: db.prepare(
       `SELECT name FROM chats WHERE jid = ?`
     ),
@@ -268,14 +258,6 @@ function prepareStatements(): void {
     deleteAlias: db.prepare('DELETE FROM aliases WHERE jid = ?'),
     allAliases: db.prepare('SELECT * FROM aliases ORDER BY name'),
     aliasByJid: db.prepare('SELECT * FROM aliases WHERE jid = ?'),
-    aliasByNameExact: db.prepare('SELECT * FROM aliases WHERE LOWER(name) = LOWER(?)'),
-    aliasByNameFuzzy: db.prepare('SELECT * FROM aliases WHERE LOWER(name) LIKE LOWER(?)'),
-    contactByNameExact: db.prepare(
-      `SELECT * FROM contacts WHERE LOWER(name) = LOWER(?) OR LOWER(notify) = LOWER(?) LIMIT 1`
-    ),
-    contactByNameFuzzy: db.prepare(
-      `SELECT * FROM contacts WHERE LOWER(name) LIKE LOWER(?) OR LOWER(notify) LIKE LOWER(?) ORDER BY name LIMIT 1`
-    ),
     contactByJid: db.prepare(
       `SELECT name, notify FROM contacts WHERE jid = ?`
     ),
@@ -401,17 +383,20 @@ export function getChatCount(): number {
   return (stmts.chatCount.get() as { c: number }).c;
 }
 
-export function findChatByName(name: string): StoredChat | undefined {
-  const exact = stmts.chatByNameExact.get(name) as ChatRow | undefined;
-  if (exact) return chatFromRow(exact);
-
-  const fuzzy = stmts.chatByNameFuzzy.get(`%${name}%`) as ChatRow | undefined;
-  return fuzzy ? chatFromRow(fuzzy) : undefined;
-}
-
 export function getChatName(jid: string): string | undefined {
   const row = stmts.chatNameByJid.get(jid) as { name: string } | undefined;
   return row?.name || undefined;
+}
+
+/** True when this JID (or its LID/phone twin) already has a chat or messages locally. */
+export function hasLocalChat(jid: string): boolean {
+  const [primary, alternate] = equivalentJids(jid);
+  const row = getDb().prepare(`
+    SELECT 1 FROM chats WHERE jid IN (@primary, @alternate)
+    UNION ALL SELECT 1 FROM messages WHERE chat_jid IN (@primary, @alternate)
+    LIMIT 1
+  `).get({ primary, alternate });
+  return Boolean(row);
 }
 
 export function getChatEphemeralExpiration(jid: string): number | null {
@@ -455,69 +440,44 @@ export function getAllAliases(): Alias[] {
   return stmts.allAliases.all() as Alias[];
 }
 
-export function getAliasByJid(jid: string): Alias | undefined {
-  return stmts.aliasByJid.get(jid) as Alias | undefined;
+export function findAliasesByExactName(name: string): Alias[] {
+  return getDb().prepare('SELECT * FROM aliases WHERE LOWER(name) = LOWER(?)').all(name.trim()) as Alias[];
 }
 
-export function findAliasByName(name: string): Alias | undefined {
-  const exact = stmts.aliasByNameExact.get(name) as Alias | undefined;
-  if (exact) return exact;
-  return stmts.aliasByNameFuzzy.get(`%${name}%`) as Alias | undefined;
+export function getAliasByJid(jid: string): Alias | undefined {
+  return stmts.aliasByJid.get(jid) as Alias | undefined;
 }
 
 // ─── Unified Name Resolution ───────────────────────────────
 
 /**
  * Resolve a JID to the best human-readable name.
- * Priority: alias → contact.name → contact.notify → chat.name → phone number
+ * Priority: alias → contact.name → contact.notify → chat.name → label.
+ * A LID and its phone JID are the same person, so both are consulted.
  */
 export function resolveDisplayName(jid: string): string {
-  // 1. Alias (highest priority — user-defined)
-  const alias = stmts.aliasByJid.get(jid) as Alias | undefined;
-  if (alias) return alias.name;
+  const [primary, alternate] = equivalentJids(jid);
+  const ids = primary === alternate ? [primary] : [primary, alternate];
 
-  // 2. Contact (server-synced)
-  const contactRow = stmts.contactByJid.get(jid) as { name: string; notify: string } | undefined;
-  if (contactRow?.name) return contactRow.name;
-  if (contactRow?.notify) return contactRow.notify;
+  for (const id of ids) {
+    const alias = stmts.aliasByJid.get(id) as Alias | undefined;
+    if (alias) return alias.name;
+  }
+  for (const id of ids) {
+    const contactRow = stmts.contactByJid.get(id) as { name: string; notify: string } | undefined;
+    if (contactRow?.name) return contactRow.name;
+  }
+  for (const id of ids) {
+    const contactRow = stmts.contactByJid.get(id) as { name: string; notify: string } | undefined;
+    if (contactRow?.notify) return contactRow.notify;
+  }
+  for (const id of ids) {
+    const chatName = getChatName(id);
+    if (chatName) return chatName;
+  }
 
-  // 3. Chat name (for groups)
-  const chatName = getChatName(jid);
-  if (chatName) return chatName;
-
-  // 4. Fallback: formatted phone number
-  const user = jid.split('@')[0];
-  if (/^\d{7,15}$/.test(user)) return `+${user}`;
-  return user;
-}
-
-/**
- * Resolve a user-provided target (alias, name, phone, JID) to a JID.
- * Priority: alias → chat name → contact name → phone number → raw JID
- */
-export function resolveTargetToJid(target: string): string {
-  // Already a JID
-  if (target.includes('@')) return target;
-
-  // Phone number
-  const digits = target.replace(/[\s\-\+\(\)]/g, '');
-  if (/^\d{7,15}$/.test(digits)) return `${digits}@s.whatsapp.net`;
-
-  // Alias lookup
-  const alias = findAliasByName(target);
-  if (alias) return alias.jid;
-
-  // Chat name lookup
-  const chat = findChatByName(target);
-  if (chat) return chat.jid;
-
-  // Contact name lookup
-  const contactExact = stmts.contactByNameExact.get(target, target) as StoredContact | undefined;
-  if (contactExact) return contactExact.jid;
-  const contactFuzzy = stmts.contactByNameFuzzy.get(`%${target}%`, `%${target}%`) as StoredContact | undefined;
-  if (contactFuzzy) return contactFuzzy.jid;
-
-  throw new Error(`Cannot resolve "${target}" to a WhatsApp JID. Use a phone number, alias, or chat name.`);
+  // Prefer the phone label when the LID mapping is known.
+  return jidLabel(ids.find(isPhoneJid) ?? primary);
 }
 
 // ─── KV Store ──────────────────────────────────────────────

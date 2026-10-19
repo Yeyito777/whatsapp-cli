@@ -19,13 +19,14 @@ import {
   upsertChat,
   kvGet,
   getChatEphemeralExpiration,
+  hasLocalChat,
   getAllAliases,
   setAlias,
   removeAlias,
-  findAliasByName,
-  resolveTargetToJid,
+  findAliasesByExactName,
   resolveDisplayName,
 } from './db.js';
+import { describeMatch, resolveTarget, type ResolvedTarget } from './resolve.js';
 import { getSocket, getConnectionStatus, isConnected, waitForConnection } from './connection.js';
 import { deserializeRawMessage, equivalentJids } from './converters.js';
 import type {
@@ -46,10 +47,28 @@ export function initHandlers(log: Logger): void {
   logger = log;
 }
 
-// ─── JID resolution helper ─────────────────────────────────
+// ─── Target resolution ─────────────────────────────────────
 
 function resolve(target: string): string {
-  return resolveTargetToJid(target);
+  return resolveTarget(target).jid;
+}
+
+/**
+ * Resolve a send target. A bare phone number that has no local chat history is
+ * checked against WhatsApp first so a typo or a non-WhatsApp number fails
+ * instead of silently going nowhere (or to a stranger).
+ */
+async function resolveSendTarget(target: string): Promise<ResolvedTarget> {
+  const resolved = resolveTarget(target);
+  if (resolved.match !== 'phone' || hasLocalChat(resolved.jid)) return resolved;
+  const results = await getSocket().onWhatsApp(resolved.jid);
+  const hit = results?.find(r => r.exists);
+  if (!hit) throw new Error(`${resolved.jid} is not a WhatsApp account; nothing was sent.`);
+  return resolved;
+}
+
+function targetSummary(resolved: ResolvedTarget): { jid: string; name: string; match: string } {
+  return { jid: resolved.jid, name: resolved.name, match: describeMatch(resolved.match) };
 }
 
 const CONNECTION_READY_TIMEOUT_MS = 10_000;
@@ -138,12 +157,12 @@ function cmdMessages(req: IpcRequest, params?: Record<string, unknown>): IpcResp
   const target = params?.target as string;
   if (!target) return { id: req.id, error: 'Missing target (JID or name)' };
 
-  const jid = resolve(target);
-  const [primaryJid, alternateJid] = equivalentJids(jid);
+  const resolved = resolveTarget(target);
+  const [primaryJid, alternateJid] = equivalentJids(resolved.jid);
   const limit = (params?.limit as number) || 50;
   const before = params?.before as string | undefined;
   const msgs = getMessagesForJids(primaryJid, alternateJid, limit, before);
-  return { id: req.id, result: msgs.reverse() };
+  return { id: req.id, result: { chat: targetSummary(resolved), messages: msgs.reverse() } };
 }
 
 function cmdSearch(req: IpcRequest, params?: Record<string, unknown>): IpcResponse {
@@ -190,7 +209,8 @@ async function cmdSend(req: IpcRequest, params?: Record<string, unknown>): Promi
   if (!target) return { id: req.id, error: 'Missing target (JID or name)' };
   if (!text) return { id: req.id, error: 'Missing message text' };
 
-  const jid = resolve(target);
+  const resolved = await resolveSendTarget(target);
+  const jid = resolved.jid;
   const sock = getSocket();
 
   const replyTo = params?.reply_to as string | undefined;
@@ -216,7 +236,7 @@ async function cmdSend(req: IpcRequest, params?: Record<string, unknown>): Promi
     quoted_id: replyTo || null,
   };
   upsertMessage(sentMsg);
-  return { id: req.id, result: { status: 'sent', id: sentMsg.id, jid, timestamp: sentMsg.timestamp } };
+  return { id: req.id, result: { status: 'sent', id: sentMsg.id, jid, timestamp: sentMsg.timestamp, chat: targetSummary(resolved) } };
 }
 
 async function cmdSendFile(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
@@ -230,13 +250,14 @@ async function cmdSendFile(req: IpcRequest, params?: Record<string, unknown>): P
   if (!filePath) return { id: req.id, error: 'Missing file path' };
   if (!fs.existsSync(filePath)) return { id: req.id, error: `File not found: ${filePath}` };
 
-  const jid = resolve(target);
+  const resolved = await resolveSendTarget(target);
+  const jid = resolved.jid;
   const sock = getSocket();
   const buf = fs.readFileSync(filePath);
   const sendPayload = buildFilePayload(filePath, buf, caption);
 
   const sent = await sock.sendMessage(jid, sendPayload as Parameters<typeof sock.sendMessage>[1], await sendOptionsForChat(jid));
-  return { id: req.id, result: { status: 'sent', id: sent?.key?.id, jid } };
+  return { id: req.id, result: { status: 'sent', id: sent?.key?.id, jid, chat: targetSummary(resolved) } };
 }
 
 async function cmdDownloadMedia(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
@@ -458,7 +479,7 @@ async function cmdGroupInfo(req: IpcRequest, params?: Record<string, unknown>): 
     participant_count: metadata.participants.length,
     participants: metadata.participants.map((p): GroupParticipant => ({
       jid: p.id,
-      name: p.name || p.notify || p.id.split('@')[0],
+      name: p.name || p.notify || resolveDisplayName(p.id),
       admin: p.admin === 'admin' || p.admin === 'superadmin',
       super_admin: p.admin === 'superadmin',
     })),
@@ -495,12 +516,20 @@ function cmdAliasList(req: IpcRequest): IpcResponse {
 }
 
 function cmdAliasSet(req: IpcRequest, params?: Record<string, unknown>): IpcResponse {
-  const jid = params?.jid as string;
-  const name = params?.name as string;
+  const target = (params?.target as string) || (params?.jid as string);
+  const name = (params?.name as string)?.trim();
   const notes = (params?.notes as string) || '';
-  if (!jid || !name) return { id: req.id, error: 'Missing jid or name' };
-  setAlias(jid, name, notes);
-  return { id: req.id, result: { jid, name, notes } };
+  if (!target || !name) return { id: req.id, error: 'Missing target or name' };
+  const resolved = resolveTarget(target);
+  if (resolved.match !== 'jid' && resolved.match !== 'phone') {
+    return { id: req.id, error: `Alias targets must be a phone number or JID (got ${describeMatch(resolved.match)} match for ${resolved.name} ${resolved.jid}).` };
+  }
+  const clashes = findAliasesByExactName(name).filter(alias => alias.jid !== resolved.jid);
+  if (clashes.length > 0) {
+    return { id: req.id, error: `Alias "${name}" already points to ${clashes.map(a => a.jid).join(', ')}. Remove it first.` };
+  }
+  setAlias(resolved.jid, name, notes);
+  return { id: req.id, result: { jid: resolved.jid, name, notes } };
 }
 
 function cmdAliasRemove(req: IpcRequest, params?: Record<string, unknown>): IpcResponse {
@@ -510,9 +539,10 @@ function cmdAliasRemove(req: IpcRequest, params?: Record<string, unknown>): IpcR
   // Try as JID first, then as alias name
   let jid = target;
   if (!target.includes('@')) {
-    const alias = findAliasByName(target);
-    if (!alias) return { id: req.id, error: `Alias "${target}" not found` };
-    jid = alias.jid;
+    const aliases = findAliasesByExactName(target);
+    if (aliases.length === 0) return { id: req.id, error: `Alias "${target}" not found` };
+    if (aliases.length > 1) return { id: req.id, error: `Alias "${target}" is ambiguous: ${aliases.map(a => a.jid).join(', ')}. Remove by JID.` };
+    jid = aliases[0].jid;
   }
 
   const removed = removeAlias(jid);
@@ -523,9 +553,7 @@ function cmdAliasRemove(req: IpcRequest, params?: Record<string, unknown>): IpcR
 function cmdResolve(req: IpcRequest, params?: Record<string, unknown>): IpcResponse {
   const target = params?.target as string;
   if (!target) return { id: req.id, error: 'Missing target' };
-  const jid = resolve(target);
-  const displayName = resolveDisplayName(jid);
-  return { id: req.id, result: { jid, name: displayName } };
+  return { id: req.id, result: targetSummary(resolveTarget(target)) };
 }
 
 // ─── Context command ───────────────────────────────────────

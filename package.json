@@ -1,13 +1,14 @@
 {
   "name": "whatsapp-cli",
   "version": "0.1.0",
-  "description": "WhatsApp CLI tool for Exocortex — full control over WhatsApp via terminal.",
+  "description": "WhatsApp CLI tool for Exocortex \u2014 full control over WhatsApp via terminal.",
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "test": "bun test",
+    "test": "bun test && node --import tsx --import ./test/setup.ts --test 'test/node/*.nodetest.ts'",
     "daemon": "tsx lib/daemon.ts",
-    "auth": "tsx lib/auth.ts"
+    "auth": "tsx lib/auth.ts",
+    "test:node": "node --import tsx --import ./test/setup.ts --test 'test/node/*.nodetest.ts'"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc.9",

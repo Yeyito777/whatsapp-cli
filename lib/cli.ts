@@ -34,6 +34,7 @@ import {
   formatSearchResults,
   formatAliases,
   formatContext,
+  type ResolvedChatSummary,
 } from './format.js';
 import type { StoredMessage, StoredChat, StoredContact, Alias, DaemonStatus, GroupInfo } from './types.js';
 
@@ -183,8 +184,11 @@ async function cmdMessages(args: string[]): Promise<void> {
   const target = args[0];
   if (!target) die('Usage: whatsapp messages <name_or_jid> [-n count]');
 
-  const messages = await sendCommand('messages', { target, limit: parseLimit(args) }) as StoredMessage[];
-  output(messages, (d) => formatMessages(d as StoredMessage[]));
+  const result = await sendCommand('messages', { target, limit: parseLimit(args) }) as {
+    chat: ResolvedChatSummary;
+    messages: StoredMessage[];
+  };
+  output(result, () => formatMessages(result.messages, result.chat));
 }
 
 async function cmdSearch(args: string[]): Promise<void> {
@@ -242,7 +246,8 @@ async function cmdSend(args: string[]): Promise<void> {
     if (jsonMode) {
       console.log(formatJson(result));
     } else {
-      console.log(`Sent file to ${structure.target}`);
+      const r = result as { chat: ResolvedChatSummary };
+      console.log(`Sent file to ${r.chat.name} <${r.chat.jid}> (matched by ${r.chat.match})`);
     }
     return;
   }
@@ -257,8 +262,8 @@ async function cmdSend(args: string[]): Promise<void> {
   if (jsonMode) {
     console.log(formatJson(result));
   } else {
-    const r = result as { jid: string; timestamp: string };
-    console.log(`Sent to ${r.jid}`);
+    const r = result as { chat: ResolvedChatSummary };
+    console.log(`Sent to ${r.chat.name} <${r.chat.jid}> (matched by ${r.chat.match})`);
   }
 }
 
@@ -348,22 +353,11 @@ async function cmdAlias(args: string[]): Promise<void> {
       const name = args[2];
       if (!target || !name) die('Usage: whatsapp alias set <jid_or_number> "Name" [--note "description"]');
 
-      // Resolve target to JID
-      let jid = target;
-      if (!target.includes('@')) {
-        const digits = target.replace(/[\s\-\+\(\)]/g, '');
-        if (/^\d{7,15}$/.test(digits)) {
-          jid = `${digits}@s.whatsapp.net`;
-        } else {
-          die(`"${target}" doesn't look like a phone number or JID. Use digits or a full JID.`);
-        }
-      }
-
       // Parse --note flag
       const noteIdx = args.indexOf('--note');
       const notes = noteIdx !== -1 ? args.slice(noteIdx + 1).join(' ') : '';
 
-      const result = await sendCommand('alias_set', { jid, name, notes }) as Alias;
+      const result = await sendCommand('alias_set', { target, name, notes }) as Alias;
       if (jsonMode) {
         console.log(formatJson(result));
       } else {

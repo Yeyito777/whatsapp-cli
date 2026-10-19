@@ -44,10 +44,12 @@ import {
 import { ConnectionReadinessGate } from './readiness.js';
 import { backoffDelay, decideOnClose, NETWORK_BACKOFF } from './reconnect-policy.js';
 import { HealthMonitor } from './health.js';
-import { advanceOutbox, stateForBaileysStatus } from './outbox.js';
+import { advanceOutbox, getOutboxEntry, stateForBaileysStatus } from './outbox.js';
+import { CatchUpWindow, LIVE_HEARTBEAT_MS, LIVE_UNTIL_KEY, notificationUpsertType } from './catch-up.js';
 import {
   publishIncomingMessageNotification,
   publishOwnerAiCommandNotification,
+  publishCatchUpSummary,
   shouldPublishIncomingMessage,
   shouldPublishOwnerAiCommand,
 } from './notifications.js';
@@ -75,6 +77,17 @@ let loggingOut = false;
 let failureCount = 0;
 let conflictCount = 0;
 let health: HealthMonitor | null = null;
+let catchUp: CatchUpWindow | null = null;
+let liveHeartbeat: NodeJS.Timeout | null = null;
+
+function markLive(): void {
+  try { kvSet(LIVE_UNTIL_KEY, String(Date.now())); } catch {}
+}
+
+function stopLiveHeartbeat(): void {
+  if (liveHeartbeat) clearInterval(liveHeartbeat);
+  liveHeartbeat = null;
+}
 let cachedWebVersion: { version: WAVersion | undefined; fetchedAt: number } | null = null;
 const WEB_VERSION_TTL_MS = 6 * 60 * 60_000;
 
@@ -119,6 +132,8 @@ export function setSocketForTest(fake: WASocket | null): void {
 }
 
 export function prepareForShutdown(): void {
+  if (connected) markLive();
+  stopLiveHeartbeat();
   stopping = true;
   health?.quiet();
   clearReconnectTimer();
@@ -347,12 +362,21 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
         lastDisconnectOutput: (lastDisconnect?.error as { output?: unknown } | undefined)?.output ?? null,
       }, 'connection.update');
 
+      if (receivedPendingNotifications && catchUp && catchUp.skipped > 0) {
+        const skipped = catchUp.skipped;
+        void publishCatchUpSummary(skipped, catchUp.sinceMs).catch((err) => {
+          logger.warn({ err, skipped }, 'Failed to publish catch-up summary');
+        });
+      }
+
       if (connection === 'close') {
         const reason = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode ?? null;
         const reasonName = disconnectReasonNameFor(reason) ?? 'unknown';
 
         sock = null;
         clearReconnectTimer();
+        if (connected) markLive();
+        stopLiveHeartbeat();
 
         if (stopping || loggingOut) {
           setDisconnectedState('disconnected', reason, 'Daemon shutting down.', null);
@@ -385,6 +409,14 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
         failureCount = 0;
         conflictCount = 0;
         health?.connected();
+
+        // Catch-up window for messages queued while we were away.
+        const lastLive = Number(kvGet(LIVE_UNTIL_KEY));
+        catchUp = new CatchUpWindow(Number.isFinite(lastLive) && lastLive > 0 ? lastLive : null, Date.now());
+        markLive();
+        stopLiveHeartbeat();
+        liveHeartbeat = setInterval(markLive, LIVE_HEARTBEAT_MS);
+        liveHeartbeat.unref?.();
         logger.info('Connected to WhatsApp');
 
         if (nextSock.user) {
@@ -502,10 +534,14 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
           preview: stored.content.slice(0, 80),
         }, 'Message received');
 
-        // Baileys uses "notify" for live arrivals and "append" while catching
-        // up. Only publish stable, genuinely incoming platform events.
+        // Baileys uses "notify" for live arrivals and "append" both for
+        // history and for messages queued while we were offline. The latter
+        // are new, so they publish too when newer than our last-live mark.
+        const sentByUs = Boolean(msg.key.id && getOutboxEntry(msg.key.id));
+        const timestampMs = Number(msg.messageTimestamp) * 1000;
+        const publishType = notificationUpsertType({ upsertType: type, sentByThisClient: sentByUs, timestampMs, window: catchUp });
         if (shouldPublishIncomingMessage({
-          upsertType: type,
+          upsertType: publishType,
           rawChatJid,
           platformMessageId: msg.key.id,
           isFromMe: stored.is_from_me,
@@ -514,7 +550,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
             logger.warn({ err, messageId: stored.id, chat: stored.chat_jid }, 'Failed to publish incoming-message notification');
           });
         } else if (shouldPublishOwnerAiCommand({
-          upsertType: type,
+          upsertType: publishType,
           rawChatJid,
           platformMessageId: msg.key.id,
           isFromMe: stored.is_from_me,

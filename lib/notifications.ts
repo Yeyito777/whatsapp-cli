@@ -219,3 +219,18 @@ export async function publishOwnerAiCommandNotification(
     throw error;
   }
 }
+
+/** One notice for catch-up messages beyond the per-reconnect cap. */
+export async function publishCatchUpSummary(skipped: number, sinceMs: number): Promise<ExternalNotificationPublishResult | null> {
+  if (!incomingSourceRegistered) await registerIncomingMessagesSource();
+  return publishExternalNotification({
+    toolName: WHATSAPP_TOOL_NAME,
+    sourceId: INCOMING_MESSAGES_SOURCE.id,
+    eventId: `catch-up:${sinceMs}`,
+    text: [
+      `${skipped} more WhatsApp messages arrived while the daemon was offline (since ${new Date(sinceMs).toISOString()}).`,
+      'They were stored but not notified individually. Review with: whatsapp chats, then whatsapp messages <chat>.',
+    ].join('\n'),
+    data: { schemaVersion: 1, kind: 'catch_up_summary', skipped, since: sinceMs },
+  });
+}

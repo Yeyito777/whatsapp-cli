@@ -20,6 +20,8 @@ import {
   kvGet,
   getChatEphemeralExpiration,
   hasLocalChat,
+  getMessageInChat,
+  getLatestIncomingMessage,
   getAllAliases,
   setAlias,
   removeAlias,
@@ -231,6 +233,8 @@ interface SendRequest {
   resolved: ResolvedTarget;
   kind: OutboxEntry['kind'];
   content: AnyMessageContent;
+  /** Extra Baileys send options (e.g. the quoted message of a reply). */
+  options?: Record<string, unknown>;
   /** Local copy stored once the message is written (text sends). */
   stored?: (sent: WAMessage) => StoredMessage | null;
 }
@@ -253,7 +257,7 @@ async function performSend(req: IpcRequest, send: SendRequest): Promise<IpcRespo
   recordSending(messageId, resolved.jid, send.kind);
   let sent: WAMessage | undefined;
   try {
-    const options = { ...(await sendOptionsForChat(resolved.jid)), messageId };
+    const options = { ...(await sendOptionsForChat(resolved.jid)), ...send.options, messageId };
     sent = await getSocket().sendMessage(resolved.jid, send.content, options);
   } catch (err) {
     // Baileys throws before the stanza is written (encryption, device lookup,
@@ -287,6 +291,32 @@ function sendResult(entry: OutboxEntry, resolved: ResolvedTarget, duplicate: boo
   };
 }
 
+/**
+ * The quoted message for a reply, as Baileys expects it: Baileys then sets the
+ * quoted sender (our own JID for our messages) and embeds the quoted content
+ * so the recipient sees a proper quote.
+ */
+function quotedMessageFor(messageId: string, resolved: ResolvedTarget): WAMessage | undefined {
+  const row = getMessageInChat(messageId, resolved.jid);
+  if (!row) return undefined;
+  const isGroup = resolved.jid.endsWith('@g.us');
+  if (row.raw_message_json) {
+    const raw = deserializeRawMessage(row.raw_message_json) as WAMessage;
+    raw.key = { ...raw.key, remoteJid: resolved.jid };
+    return raw;
+  }
+  return {
+    key: {
+      remoteJid: resolved.jid,
+      fromMe: row.is_from_me,
+      id: row.id,
+      ...(isGroup && !row.is_from_me && row.sender_jid ? { participant: row.sender_jid } : {}),
+    },
+    message: { conversation: row.content || row.media_caption || (row.media_type ? `[${row.media_type}]` : '') },
+    messageTimestamp: Math.floor(Date.parse(row.timestamp) / 1000),
+  };
+}
+
 function requestMessageId(params?: Record<string, unknown>): string {
   const provided = params?.message_id;
   if (provided === undefined) return generateOutgoingMessageId();
@@ -308,19 +338,20 @@ async function cmdSend(req: IpcRequest, params?: Record<string, unknown>): Promi
   const messageId = requestMessageId(params);
   const resolved = await resolveSendTarget(target);
   const replyTo = params?.reply_to as string | undefined;
-  const content: Record<string, unknown> = { text };
+  let quoted: WAMessage | undefined;
   if (replyTo) {
-    content.contextInfo = {
-      stanzaId: replyTo,
-      participant: resolved.jid.endsWith('@g.us') ? undefined : resolved.jid,
-    };
+    quoted = quotedMessageFor(replyTo, resolved);
+    if (!quoted) {
+      return { id: req.id, error: `Message ${replyTo} is not in ${resolved.name} <${resolved.jid}>; nothing was sent. Pick the reply ID from 'whatsapp messages' for that chat.` };
+    }
   }
 
   return performSend(req, {
     messageId,
     resolved,
     kind: 'text',
-    content: content as AnyMessageContent,
+    content: { text },
+    options: quoted ? { quoted } : undefined,
     stored: (sent) => waMessageToStored(sent),
   });
 }
@@ -533,13 +564,19 @@ async function cmdMarkRead(req: IpcRequest, params?: Record<string, unknown>): P
   const target = params?.target as string;
   if (!target) return { id: req.id, error: 'Missing target' };
 
-  const jid = resolve(target);
-  const [primaryJid, alternateJid] = equivalentJids(jid);
-  const lastMsgs = getMessagesForJids(primaryJid, alternateJid, 1);
-  if (lastMsgs.length > 0) {
-    await getSocket().readMessages([{ remoteJid: lastMsgs[0].chat_jid, id: lastMsgs[0].id }]);
+  const resolved = resolveTarget(target);
+  const latest = getLatestIncomingMessage(resolved.jid);
+  if (latest) {
+    // Group receipts must name the sender of the message being read.
+    const isGroup = latest.chat_jid.endsWith('@g.us');
+    await getSocket().readMessages([{
+      remoteJid: latest.chat_jid,
+      id: latest.id,
+      fromMe: false,
+      ...(isGroup && latest.sender_jid ? { participant: latest.sender_jid } : {}),
+    }]);
   }
-  return { id: req.id, result: { status: 'read', jid } };
+  return { id: req.id, result: { status: latest ? 'read' : 'nothing_to_read', jid: resolved.jid, chat: targetSummary(resolved) } };
 }
 
 async function cmdGroupInfo(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {

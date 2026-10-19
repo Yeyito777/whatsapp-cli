@@ -470,8 +470,10 @@ async function cmdRead(args: string[]): Promise<void> {
   const target = args[0];
   if (!target) die('Usage: whatsapp read <name_or_jid>');
 
-  await sendCommand('mark_read', { target });
-  console.log(`Marked ${target} as read`);
+  const result = await sendCommand('mark_read', { target }) as { status: string; chat: ResolvedChatSummary };
+  if (jsonMode) console.log(formatJson(result));
+  else if (result.status === 'nothing_to_read') console.log(`No incoming messages in ${result.chat.name} <${result.chat.jid}>`);
+  else console.log(`Marked ${result.chat.name} <${result.chat.jid}> as read (matched by ${result.chat.match})`);
 }
 
 async function cmdInfo(args: string[]): Promise<void> {

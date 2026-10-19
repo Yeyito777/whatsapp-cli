@@ -5,7 +5,7 @@ import type { WASocket } from '@whiskeysockets/baileys';
 
 import { setSocketForTest } from '../../lib/connection.ts';
 import { handleCommand, initHandlers } from '../../lib/handlers.ts';
-import { upsertContact } from '../../lib/db.ts';
+import { upsertChat, upsertContact, upsertMessage } from '../../lib/db.ts';
 import { advanceOutbox, getOutboxEntry, markInterruptedSendsUnknown, recordSending } from '../../lib/outbox.ts';
 import { resetDb } from './helpers.ts';
 
@@ -99,5 +99,70 @@ describe('sends are idempotent per message ID', () => {
     advanceOutbox('3EB0GGGGGGGGGGGGGGGGGG', 'delivered');
     advanceOutbox('3EB0GGGGGGGGGGGGGGGGGG', 'server_ack');
     assert.equal(getOutboxEntry('3EB0GGGGGGGGGGGGGGGGGG')?.state, 'delivered');
+  });
+});
+
+describe('replies and read receipts', () => {
+  beforeEach(() => {
+    resetDb();
+    upsertContact({ jid: '15550001234@s.whatsapp.net', name: 'Bob' });
+  });
+
+  test('a reply passes the stored message as quoted, with our own JID for our messages', async () => {
+    const calls = fakeSocket({ ack: 'server' });
+    upsertMessage({
+      id: 'Q1', chat_jid: '15550001234@s.whatsapp.net', sender_jid: '15550009999@s.whatsapp.net', sender_name: 'Me',
+      content: 'see you at 5', timestamp: '2026-10-19T10:00:00.000Z', is_from_me: true,
+      media_type: null, media_caption: null, quoted_id: null,
+    });
+    const res = await send({ target: 'Bob', text: 'ok', reply_to: 'Q1', message_id: '3EB0HHHHHHHHHHHHHHHHHH' });
+    assert.equal(res.error, undefined);
+    const quoted = calls[0].options.quoted as { key: Record<string, unknown>; message: Record<string, unknown> };
+    assert.deepEqual(quoted.key, { remoteJid: '15550001234@s.whatsapp.net', fromMe: true, id: 'Q1' });
+    assert.equal(quoted.message.conversation, 'see you at 5');
+    assert.equal(calls[0].content.contextInfo, undefined, 'no hand-built contextInfo');
+  });
+
+  test('a group reply names the quoted sender', async () => {
+    const calls = fakeSocket({ ack: 'server' });
+    upsertChat({ jid: '120363000000000001@g.us', name: 'Team', is_group: true });
+    upsertMessage({
+      id: 'Q2', chat_jid: '120363000000000001@g.us', sender_jid: '15550005555@s.whatsapp.net', sender_name: 'Ann',
+      content: 'who is in?', timestamp: '2026-10-19T10:00:00.000Z', is_from_me: false,
+      media_type: null, media_caption: null, quoted_id: null,
+    });
+    await send({ target: 'Team', text: 'me', reply_to: 'Q2', message_id: '3EB0IIIIIIIIIIIIIIIIII' });
+    const quoted = calls[0].options.quoted as { key: Record<string, unknown> };
+    assert.equal(quoted.key.participant, '15550005555@s.whatsapp.net');
+  });
+
+  test('replying to a message from another chat is refused before sending', async () => {
+    const calls = fakeSocket({ ack: 'server' });
+    upsertMessage({
+      id: 'Q3', chat_jid: '15550007777@s.whatsapp.net', sender_jid: '15550007777@s.whatsapp.net', sender_name: 'Eve',
+      content: 'secret', timestamp: '2026-10-19T10:00:00.000Z', is_from_me: false,
+      media_type: null, media_caption: null, quoted_id: null,
+    });
+    const res = await send({ target: 'Bob', text: 'ok', reply_to: 'Q3', message_id: '3EB0JJJJJJJJJJJJJJJJJJ' });
+    assert.match(res.error ?? '', /not in Bob/);
+    assert.equal(calls.length, 0);
+  });
+
+  test('read marks the latest incoming message and names the group sender', async () => {
+    const reads: unknown[] = [];
+    fakeSocket();
+    const sock = (await import('../../lib/connection.ts')).getSocket() as unknown as Record<string, unknown>;
+    sock.readMessages = async (keys: unknown[]) => { reads.push(...keys); };
+    upsertChat({ jid: '120363000000000002@g.us', name: 'Club', is_group: true });
+    upsertMessage({
+      id: 'R1', chat_jid: '120363000000000002@g.us', sender_jid: '15550006666@s.whatsapp.net', sender_name: 'Kim',
+      content: 'hi', timestamp: '2026-10-19T10:00:00.000Z', is_from_me: false, media_type: null, media_caption: null, quoted_id: null,
+    });
+    upsertMessage({
+      id: 'R2', chat_jid: '120363000000000002@g.us', sender_jid: '15550009999@s.whatsapp.net', sender_name: 'Me',
+      content: 'hey', timestamp: '2026-10-19T10:01:00.000Z', is_from_me: true, media_type: null, media_caption: null, quoted_id: null,
+    });
+    await handleCommand({ id: 2, method: 'mark_read', params: { target: 'Club' } });
+    assert.deepEqual(reads, [{ remoteJid: '120363000000000002@g.us', id: 'R1', fromMe: false, participant: '15550006666@s.whatsapp.net' }]);
   });
 });

@@ -339,6 +339,27 @@ export function getMessageMediaById(messageId: string): StoredMediaMessage {
   return mediaMessageFromRow(rows[0]);
 }
 
+/** A message by ID within one chat (either of its LID/phone identities). */
+export function getMessageInChat(messageId: string, chatJid: string): (StoredMessage & { raw_message_json: string | null }) | undefined {
+  const [primary, alternate] = equivalentJids(chatJid);
+  const row = getDb().prepare(`
+    SELECT * FROM messages WHERE id = ? AND chat_jid IN (?, ?)
+    ORDER BY CASE WHEN raw_message_json IS NOT NULL THEN 0 ELSE 1 END
+    LIMIT 1
+  `).get(messageId, primary, alternate) as MessageRow | undefined;
+  return row ? { ...messageFromRow(row), raw_message_json: row.raw_message_json ?? null } : undefined;
+}
+
+/** Latest message in a chat that someone else sent. */
+export function getLatestIncomingMessage(chatJid: string): StoredMessage | undefined {
+  const [primary, alternate] = equivalentJids(chatJid);
+  const row = getDb().prepare(`
+    SELECT * FROM messages WHERE chat_jid IN (?, ?) AND is_from_me = 0
+    ORDER BY timestamp DESC LIMIT 1
+  `).get(primary, alternate) as MessageRow | undefined;
+  return row ? messageFromRow(row) : undefined;
+}
+
 export function getMessageCount(): number {
   return (stmts.messageCount.get() as { c: number }).c;
 }

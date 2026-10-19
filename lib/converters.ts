@@ -71,7 +71,7 @@ export function waMessageToStored(msg: proto.IWebMessageInfo): StoredMessage | n
   // Skip protocol messages with no useful content
   if (!content && !media.type) return null;
 
-  const quotedId = normalized.extendedTextMessage?.contextInfo?.stanzaId || null;
+  const quotedId = getFirstContextInfo(normalized)?.stanzaId || null;
 
   const sender = msg.key?.participant || msg.key?.remoteJid || '';
   const senderName = msg.pushName || jidLabel(sender);

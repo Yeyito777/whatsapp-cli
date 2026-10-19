@@ -40,7 +40,13 @@ import {
   registerLidMapping,
   translateJid,
   getMessageEphemeralExpiration,
+  getOwnJid,
+  knownLidMappings,
+  learnKeyMappings,
+  onNewLidMapping,
+  setOwnJid,
 } from './converters.js';
+import { backupDatabaseOnce, mergeLidIdentity, repairStoredIdentities } from './migrations.js';
 import { ConnectionReadinessGate } from './readiness.js';
 import { backoffDelay, decideOnClose, NETWORK_BACKOFF } from './reconnect-policy.js';
 import { HealthMonitor } from './health.js';
@@ -233,6 +239,36 @@ function scheduleReconnect(logger: Logger, delayMs: number): void {
 
 // ─── Connect ───────────────────────────────────────────────
 
+let historyRepaired = false;
+
+/**
+ * Merge LID duplicates into phone identities and fix the sender of our own
+ * messages, once per process (after a DB backup on the very first run), then
+ * keep merging as new mappings are learned.
+ */
+async function repairHistoryOnce(logger: Logger): Promise<void> {
+  if (historyRepaired) return;
+  try {
+    await backupDatabaseOnce(logger);
+    const totals = repairStoredIdentities(knownLidMappings(), getOwnJid());
+    logger.info(totals, 'Repaired stored WhatsApp identities');
+    onNewLidMapping((lid, pn) => {
+      try {
+        const counts = mergeLidIdentity(lid, pn);
+        if (counts.messagesMoved || counts.messagesDeduplicated || counts.chatsMerged) {
+          logger.info({ lid, pn, ...counts }, 'Merged LID history into phone identity');
+        }
+      } catch (err) {
+        logger.warn({ err, lid, pn }, 'Could not merge LID history');
+      }
+    });
+    historyRepaired = true;
+  } catch (err) {
+    // Never block connecting on a repair; it is retried on the next connect.
+    logger.warn({ err }, 'History repair failed; will retry on next connect');
+  }
+}
+
 /** WA Web version, fetched at most every few hours instead of on every reconnect. */
 async function webVersion(logger: Logger): Promise<WAVersion | undefined> {
   if (cachedWebVersion && Date.now() - cachedWebVersion.fetchedAt < WEB_VERSION_TTL_MS) {
@@ -276,6 +312,9 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
         }
       }
     }
+
+    setOwnJid(state.creds.me?.id);
+    await repairHistoryOnce(logger);
 
     logger.info({
       authMeId: state.creds.me?.id ?? null,
@@ -426,6 +465,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
             registerLidMapping(nextSock.user.lid!, nextSock.user.id);
           }
           kvSet('phone_number', phoneUser);
+          setOwnJid(nextSock.user.id);
         }
 
         nextSock.sendPresenceUpdate('available').catch(() => {});
@@ -508,6 +548,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
       if (!isCurrentSocket(socketId, nextSock)) return;
 
       for (const msg of messages) {
+        learnKeyMappings(msg.key as Parameters<typeof learnKeyMappings>[0]);
         const rawChatJid = msg.key?.remoteJid;
         const chatJid = rawChatJid && rawChatJid !== 'status@broadcast' ? translateJid(rawChatJid) : null;
         const ephemeralExpiration = getMessageEphemeralExpiration(msg);
@@ -581,7 +622,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
       for (const u of updates) {
         if (!u.id) continue;
         upsertChat({
-          jid: u.id,
+          jid: translateJid(u.id),
           name: (u as unknown as Record<string, string>).name || '',
           unread_count: u.unreadCount,
           muted: u.muteEndTime != null ? Number(u.muteEndTime) > 0 : undefined,

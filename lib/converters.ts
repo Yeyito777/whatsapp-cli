@@ -17,11 +17,61 @@ import { jidLabel } from './jid.js';
 const lidToPhoneMap: Record<string, string> = {};
 const phoneToLidMap: Record<string, string> = {};
 
+type MappingListener = (lidJid: string, phoneJid: string) => void;
+let mappingListener: MappingListener | null = null;
+
+/** Called once per newly learned LID→phone mapping (used to merge stored rows). */
+export function onNewLidMapping(listener: MappingListener | null): void {
+  mappingListener = listener;
+}
+
 export function registerLidMapping(lid: string, phone: string): void {
+  if (!lid.endsWith('@lid') || !phone.includes('@s.whatsapp.net')) return;
   const lidUser = lid.split('@')[0].split(':')[0];
   const phoneUser = phone.split('@')[0].split(':')[0];
-  lidToPhoneMap[lidUser] = `${phoneUser}@s.whatsapp.net`;
+  if (!lidUser || !phoneUser) return;
+  const phoneJid = `${phoneUser}@s.whatsapp.net`;
+  const isNew = lidToPhoneMap[lidUser] !== phoneJid;
+  lidToPhoneMap[lidUser] = phoneJid;
   phoneToLidMap[phoneUser] = `${lidUser}@lid`;
+  if (isNew) mappingListener?.(`${lidUser}@lid`, phoneJid);
+}
+
+export function knownLidMappings(): Array<[lidJid: string, phoneJid: string]> {
+  return Object.entries(lidToPhoneMap).map(([lidUser, phoneJid]) => [`${lidUser}@lid`, phoneJid]);
+}
+
+/**
+ * Baileys 7 message keys carry the other identity (remoteJidAlt /
+ * participantAlt) when WhatsApp addresses a chat by LID. Learn the mapping
+ * from them so the message is stored under the phone JID.
+ */
+export function learnKeyMappings(key: { remoteJid?: string | null; remoteJidAlt?: string | null; participant?: string | null; participantAlt?: string | null } | null | undefined): void {
+  if (!key) return;
+  const pairs: Array<[string | null | undefined, string | null | undefined]> = [
+    [key.remoteJid, key.remoteJidAlt],
+    [key.participant, key.participantAlt],
+  ];
+  for (const [a, b] of pairs) {
+    if (!a || !b) continue;
+    if (a.endsWith('@lid') && b.endsWith('@s.whatsapp.net')) registerLidMapping(a, b);
+    else if (b.endsWith('@lid') && a.endsWith('@s.whatsapp.net')) registerLidMapping(b, a);
+  }
+}
+
+// ─── Own identity ──────────────────────────────────────────
+
+let ownPhoneJid: string | null = null;
+
+/** Our own phone JID (device suffix stripped), once the socket knows it. */
+export function setOwnJid(jid: string | null | undefined): void {
+  if (!jid) return;
+  const user = jid.split('@')[0].split(':')[0];
+  if (user) ownPhoneJid = `${user}@s.whatsapp.net`;
+}
+
+export function getOwnJid(): string | null {
+  return ownPhoneJid;
 }
 
 /** True when `user` (bare digits) is a known Linked Identity, not a phone number. */
@@ -58,6 +108,7 @@ export function waMessageToStored(msg: proto.IWebMessageInfo): StoredMessage | n
 
   const rawJid = msg.key?.remoteJid;
   if (!rawJid || rawJid === 'status@broadcast') return null;
+  learnKeyMappings(msg.key as Parameters<typeof learnKeyMappings>[0]);
 
   const chatJid = translateJid(rawJid);
   const media = getMediaInfo(normalized);
@@ -73,8 +124,13 @@ export function waMessageToStored(msg: proto.IWebMessageInfo): StoredMessage | n
 
   const quotedId = getFirstContextInfo(normalized)?.stanzaId || null;
 
-  const sender = msg.key?.participant || msg.key?.remoteJid || '';
-  const senderName = msg.pushName || jidLabel(sender);
+  // Our own messages are from us, not from the chat (the old code stored the
+  // recipient as the sender of every message we sent in a DM).
+  const fromMe = Boolean(msg.key?.fromMe);
+  const sender = fromMe
+    ? ownPhoneJid || msg.key?.participant || ''
+    : msg.key?.participant || msg.key?.remoteJid || '';
+  const senderName = fromMe ? 'Me' : msg.pushName || jidLabel(sender);
 
   const timestamp = msg.messageTimestamp
     ? new Date(Number(msg.messageTimestamp) * 1000).toISOString()
@@ -237,10 +293,13 @@ export function deserializeRawMessage(raw: string): proto.IWebMessageInfo {
 
 /** Convert a Baileys chat object (from sync or upsert) to a StoredChat partial. */
 export function baileysChatToStored(c: proto.IConversation & Record<string, unknown>): Partial<StoredChat> & { jid: string } {
+  const rawId = (c.id as string) || '';
+  const pnJid = (c as { pnJid?: string }).pnJid;
+  if (rawId.endsWith('@lid') && pnJid) registerLidMapping(rawId, pnJid);
   return {
-    jid: (c.id as string) || '',
+    jid: translateJid(rawId),
     name: (c.name as string) || '',
-    is_group: (c.id as string)?.endsWith('@g.us') || false,
+    is_group: rawId.endsWith('@g.us'),
     last_message_time: c.lastMessageRecvTimestamp
       ? new Date(Number(c.lastMessageRecvTimestamp) * 1000).toISOString()
       : '',
@@ -256,11 +315,18 @@ export function baileysChatToStored(c: proto.IConversation & Record<string, unkn
 // ─── Contacts ──────────────────────────────────────────────
 
 /** Convert a Baileys contact to a StoredContact partial. */
-export function baileysContactToStored(c: { id: string; name?: string | null; notify?: string | null; phoneNumber?: string | null }): Partial<StoredContact> & { jid: string } {
+export function baileysContactToStored(c: { id: string; lid?: string | null; name?: string | null; notify?: string | null; phoneNumber?: string | null }): Partial<StoredContact> & { jid: string } {
+  if (c.id.endsWith('@lid') && c.phoneNumber) registerLidMapping(c.id, c.phoneNumber);
+  if (c.lid && c.id.endsWith('@s.whatsapp.net')) registerLidMapping(c.lid, c.id);
+  const jid = translateJid(c.id);
+  // A LID's digits are not a phone number.
+  const phone = c.phoneNumber
+    ? c.phoneNumber.split('@')[0].split(':')[0]
+    : jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0].split(':')[0] : '';
   return {
-    jid: c.id,
+    jid,
     name: c.name || '',
     notify: c.notify || '',
-    phone: c.phoneNumber || c.id.split('@')[0] || '',
+    phone,
   };
 }

@@ -10,7 +10,8 @@ import path from 'path';
 
 import { IpcOutcomeUnknownError, sendCommand, isDaemonRunning } from './client.js';
 import { generateOutgoingMessageId } from './message-id.js';
-import { LOG_FILE } from './paths.js';
+import { AUTH_DIR, LOG_FILE } from './paths.js';
+import { acquireSessionLock, SessionLockedError } from './session-lock.js';
 import {
   listExternalNotificationSubscriptions,
   manageExternalToolDaemon,
@@ -160,6 +161,42 @@ async function cmdDaemon(args: string[]): Promise<void> {
     default:
       die(`Unknown daemon command: ${subcmd}\nUsage: whatsapp daemon start|stop|restart|status|logs`);
   }
+}
+
+async function cmdLogout(args: string[]): Promise<void> {
+  const usage = [
+    'usage: whatsapp logout --yes',
+    '',
+    'Unlinks this machine from the WhatsApp account (it disappears from the',
+    "phone's Linked Devices) and deletes the local credentials. Message history",
+    'stays. Getting WhatsApp back requires `whatsapp login` and a QR scan by the',
+    'phone owner. A session conflict does NOT need this: run',
+    '`whatsapp daemon restart` instead.',
+  ].join('\n');
+  if (args.includes('-h') || args.includes('--help')) {
+    console.log(usage);
+    return;
+  }
+  if (!args.includes('--yes')) die(`Refusing to log out without --yes.\n\n${usage}`);
+
+  if (isDaemonRunning()) {
+    const result = await sendCommand('logout', undefined, 60_000) as { unlinked: boolean };
+    console.log(result.unlinked
+      ? 'Logged out: device unlinked from the account and local credentials deleted.'
+      : 'Local credentials deleted. WhatsApp was not reachable, so the device may still be listed under Linked Devices on the phone.');
+    return;
+  }
+
+  let release: () => void;
+  try {
+    release = acquireSessionLock('whatsapp logout');
+  } catch (err) {
+    if (err instanceof SessionLockedError) die(`${err.message} Stop it first.`);
+    throw err;
+  }
+  fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+  release();
+  console.log('Local credentials deleted (daemon not running, so the device may still be listed under Linked Devices on the phone).');
 }
 
 async function cmdChats(_args: string[]): Promise<void> {
@@ -569,6 +606,28 @@ async function cmdNotify(args: string[]): Promise<void> {
   }
 }
 
+// ─── Help ──────────────────────────────────────────────────
+
+/** Usage for commands without their own --help handling. */
+const COMMAND_HELP: Record<string, string> = {
+  daemon: 'usage: whatsapp daemon start|stop|restart|status|logs [-f]',
+  chats: 'usage: whatsapp chats\n\nAll chats, most recent first, with their JIDs.',
+  groups: 'usage: whatsapp groups',
+  contacts: 'usage: whatsapp contacts',
+  messages: 'usage: whatsapp messages <target> [-n count]\n\nPrints which chat the target resolved to, then its messages (oldest first).\nJSON: {"chat": {...}, "messages": [...]}.',
+  search: 'usage: whatsapp search <query> [-n count]',
+  media: 'usage: whatsapp media download <message_id> <outdir>',
+  typing: 'usage: whatsapp typing <target> on|off',
+  read: 'usage: whatsapp read <target>\n\nMarks the latest incoming message in the chat as read.',
+  info: 'usage: whatsapp info <group>',
+  sync: 'usage: whatsapp sync\n\nRe-fetches group names and settings.',
+  alias: 'usage: whatsapp alias [list] | set <phone_or_jid> "Name" [--note text] | remove <name_or_jid>',
+  context: 'usage: whatsapp context\n\nAccount status, aliases and recent chats.',
+};
+COMMAND_HELP.msgs = COMMAND_HELP.messages;
+COMMAND_HELP.s = COMMAND_HELP.search;
+COMMAND_HELP.ctx = COMMAND_HELP.context;
+
 // ─── Main ──────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -582,9 +641,15 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  if (COMMAND_HELP[cmd] && (cmdArgs.includes('-h') || cmdArgs.includes('--help'))) {
+    console.log(COMMAND_HELP[cmd]);
+    return;
+  }
+
   try {
     switch (cmd) {
       case 'daemon':    await cmdDaemon(cmdArgs); break;
+      case 'logout':    await cmdLogout(cmdArgs); break;
       case 'chats':     await cmdChats(cmdArgs); break;
       case 'groups':    await cmdGroups(cmdArgs); break;
       case 'contacts':  await cmdContacts(cmdArgs); break;

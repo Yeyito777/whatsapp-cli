@@ -12,7 +12,7 @@ usage: whatsapp <command> [args]
 
 commands:
   login        Authenticate with WhatsApp (one-time setup)   (alias: auth)
-  logout       Remove stored credentials
+  logout       Unlink this device and delete its credentials (needs --yes)
   daemon       Manage background daemon (start|stop|restart|status|logs)
 
   context      AI orientation — account, aliases, recent chats  (alias: ctx)
@@ -72,8 +72,7 @@ case "$cmd" in
     login|auth)
         exec "$TSX" "$PROJECT_DIR/lib/auth.ts" "$@" ;;
     logout)
-        rm -rf "$PROJECT_DIR/config/auth"
-        echo "Logged out. Auth credentials removed." ;;
+        exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} logout "$@" ;;
     daemon)
         exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} daemon "$@" ;;
     chats|groups|contacts|messages|msgs|search|s|send|outbox|media|typing|read|info|context|ctx|alias|sync|notify)

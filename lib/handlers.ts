@@ -27,7 +27,7 @@ import {
   resolveDisplayName,
 } from './db.js';
 import { describeMatch, resolveTarget, type ResolvedTarget } from './resolve.js';
-import { getSocket, getConnectionStatus, isConnected, waitForConnection } from './connection.js';
+import { getSocket, getConnectionStatus, isConnected, logoutSession, waitForConnection } from './connection.js';
 import { deserializeRawMessage, equivalentJids, waMessageToStored } from './converters.js';
 import {
   advanceOutbox,
@@ -134,6 +134,7 @@ export async function handleCommand(req: IpcRequest): Promise<IpcResponse> {
       case 'outbox':        return cmdOutbox(req, params);
       case 'ping':          return { id: req.id, result: 'pong' };
       case 'shutdown':      return cmdShutdown(req);
+      case 'logout':        return { id: req.id, result: await logoutSession(logger) };
       default:
         return { id: req.id, error: `Unknown method: ${method}` };
     }

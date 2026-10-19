@@ -8,6 +8,7 @@
  */
 import fs from 'fs';
 import http from 'http';
+import path from 'path';
 import readline from 'readline';
 
 import makeWASocket, {
@@ -22,12 +23,38 @@ import qrTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
 
 import { AUTH_DIR } from './paths.js';
+import { isDaemonRunning, sendCommand } from './client.js';
+import { manageExternalToolDaemon } from './exocortex.js';
+import { acquireSessionLock, hasLinkedSession, SessionLockedError } from './session-lock.js';
+import type { DaemonStatus } from './types.js';
 
 const logger = pino({ level: 'warn' });
 
-const usePairingCode = process.argv.includes('--pairing-code');
-const useBrowser = process.argv.includes('--browser');
-const phoneArg = process.argv.find((_, i, arr) => arr[i - 1] === '--phone');
+const USAGE = `usage:
+  whatsapp login                                  # QR code in terminal
+  whatsapp login --pairing-code [--phone 1415...] # pairing code
+  whatsapp login --browser                        # QR via http://127.0.0.1:9182
+
+Links this machine as a WhatsApp device. Refuses to run while a linked
+session is active (it would knock the running daemon offline).`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('-h') || argv.includes('--help') || argv[0] === 'help') {
+  console.log(USAGE);
+  process.exit(0);
+}
+for (let i = 0; i < argv.length; i++) {
+  const arg = argv[i];
+  if (arg === '--phone') { i++; continue; }
+  if (arg !== '--pairing-code' && arg !== '--browser') {
+    console.error(`whatsapp login: unknown argument '${arg}'\n\n${USAGE}`);
+    process.exit(2);
+  }
+}
+
+const usePairingCode = argv.includes('--pairing-code');
+const useBrowser = argv.includes('--browser');
+const phoneArg = argv.find((_, i, arr) => arr[i - 1] === '--phone');
 
 function askQuestion(prompt: string): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -67,15 +94,15 @@ function startBrowserServer(): http.Server {
 </body></html>`);
   });
 
-  server.listen(BROWSER_PORT, () => {
-    console.log(`\n🌐 QR code page ready at: http://localhost:${BROWSER_PORT}`);
+  server.listen(BROWSER_PORT, '127.0.0.1', () => {
+    console.log(`\n🌐 QR code page ready at: http://127.0.0.1:${BROWSER_PORT}`);
     console.log('   Opening in browser...\n');
   });
 
   // Open in browser
   import('child_process').then(({ execSync }) => {
     setTimeout(() => {
-      try { execSync(`xdg-open http://localhost:${BROWSER_PORT}`, { stdio: 'ignore' }); } catch {}
+      try { execSync(`xdg-open http://127.0.0.1:${BROWSER_PORT}`, { stdio: 'ignore' }); } catch {}
     }, 500);
   });
 
@@ -91,9 +118,9 @@ async function connectSocket(
 ): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
-  if (state.creds.registered && !isReconnect) {
+  if (hasLinkedSession(state.creds) && !isReconnect) {
     console.log('✓ Already authenticated with WhatsApp');
-    console.log('  To re-authenticate: whatsapp logout && whatsapp login');
+    console.log('  If WhatsApp logged this device out, run: whatsapp logout --yes, then whatsapp login');
     if (browserServer) {
       statusMessage = '✓ Already authenticated!';
       setTimeout(() => { browserServer.close(); process.exit(0); }, 2000);
@@ -180,7 +207,9 @@ async function connectSocket(
 
     if (connection === 'open') {
       console.log('\n✓ Successfully authenticated with WhatsApp!');
-      console.log('  Credentials saved. Start the daemon with: whatsapp daemon start\n');
+      // Hand the session to the daemon: close ours first so only one connects.
+      try { sock.end(undefined); } catch {}
+      await restartDaemonAfterLogin();
       if (browserServer) {
         statusMessage = '✓ Authenticated! You can close this page.';
         setTimeout(() => { browserServer.close(); process.exit(0); }, 3000);
@@ -195,8 +224,62 @@ async function connectSocket(
 
 // ─── Main ────────────────────────────────────────────────────
 
+async function restartDaemonAfterLogin(): Promise<void> {
+  releaseLock?.();
+  try {
+    const status = await manageExternalToolDaemon('whatsapp', 'restart');
+    console.log(`  ${status.message}\n`);
+  } catch {
+    console.log('  Credentials saved. Start the daemon with: whatsapp daemon start\n');
+  }
+}
+
+let releaseLock: (() => void) | null = null;
+
+/** Refuse to pair while another process owns this linked-device session. */
+async function ensureSessionIsFree(): Promise<void> {
+  if (isDaemonRunning()) {
+    let status: DaemonStatus | null = null;
+    try {
+      status = await sendCommand('status', undefined, 5_000) as DaemonStatus;
+    } catch {}
+    if (status?.connection_state === 'logged_out' && fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
+      // WhatsApp revoked these credentials; keep them aside and pair afresh.
+      const aside = `${AUTH_DIR}.revoked-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      fs.renameSync(AUTH_DIR, aside);
+      fs.chmodSync(aside, 0o700);
+      fs.mkdirSync(AUTH_DIR, { recursive: true, mode: 0o700 });
+      console.log(`Moved the revoked credentials to ${aside}`);
+    }
+    if (!status || status.connection_state !== 'logged_out') {
+      if (status?.connection_state === 'connected') {
+        console.log('✓ Already linked and connected; nothing to do. (whatsapp daemon status)');
+        process.exit(0);
+      }
+      const state = status?.connection_state ?? 'running';
+      console.error(`✗ The WhatsApp daemon is ${state}; logging in now would open a second connection and knock it offline.`);
+      if (status?.connection_state === 'conflict') {
+        console.error('  The session conflict is usually another copy of this client. Stop it, then: whatsapp daemon restart');
+      } else {
+        console.error('  Check with: whatsapp daemon status');
+      }
+      process.exit(1);
+    }
+  }
+  try {
+    releaseLock = acquireSessionLock('whatsapp login');
+  } catch (err) {
+    if (err instanceof SessionLockedError) {
+      console.error(`✗ ${err.message} Logging in now would knock it offline.`);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
 async function main(): Promise<void> {
-  fs.mkdirSync(AUTH_DIR, { recursive: true });
+  fs.mkdirSync(AUTH_DIR, { recursive: true, mode: 0o700 });
+  await ensureSessionIsFree();
 
   let phoneNumber = phoneArg;
   if (usePairingCode && !phoneNumber) {

@@ -18,6 +18,7 @@ import makeWASocket, {
 import pino from 'pino';
 
 import { AUTH_DIR } from './paths.js';
+import { acquireSessionLock, hasLinkedSession, SessionLockedError } from './session-lock.js';
 import {
   upsertMessage,
   upsertMessages,
@@ -64,6 +65,8 @@ let activeSocketId = 0;
 let connectPromise: Promise<void> | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let stopping = false;
+let releaseSessionLock: (() => void) | null = null;
+let loggingOut = false;
 
 let connected = false;
 let connectionState: ConnectionState = 'disconnected';
@@ -113,6 +116,38 @@ export function prepareForShutdown(): void {
 
 function isCurrentSocket(socketId: number, candidate: WASocket): boolean {
   return socketId === activeSocketId && sock === candidate;
+}
+
+function releaseLock(): void {
+  releaseSessionLock?.();
+  releaseSessionLock = null;
+}
+
+/**
+ * Unlink this device from the account (it disappears from the phone's Linked
+ * Devices), delete the local credentials and stay idle until a new login.
+ */
+export async function logoutSession(logger: Logger): Promise<{ unlinked: boolean }> {
+  loggingOut = true;
+  clearReconnectTimer();
+  let unlinked = false;
+  const current = sock;
+  if (current && connected) {
+    try {
+      await current.logout('Logged out from whatsapp-cli');
+      unlinked = true;
+    } catch (err) {
+      logger.warn({ err }, 'Server-side logout failed; deleting local credentials anyway');
+    }
+  }
+  try { current?.end(undefined); } catch {}
+  sock = null;
+  fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+  fs.mkdirSync(AUTH_DIR, { recursive: true, mode: 0o700 });
+  setDisconnectedState('logged_out', DisconnectReason.loggedOut, 'Logged out by request.', 'Run: whatsapp login');
+  releaseLock();
+  loggingOut = false;
+  return { unlinked };
 }
 
 function clearReconnectTimer(): void {
@@ -205,15 +240,29 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
 
     // Check for auth: 'registered' is only true for primary devices.
     // Linked devices (our case) have me.id set instead.
-    if (!state.creds.registered && !state.creds.me?.id) {
+    if (!hasLinkedSession(state.creds)) {
       setDisconnectedState(
         'logged_out',
         DisconnectReason.loggedOut,
         'Not authenticated.',
         'Run: whatsapp login',
       );
+      releaseLock();
       logger.error('Not authenticated. Run: whatsapp login');
       return;
+    }
+
+    // Only one process may connect with these credentials (see session-lock).
+    if (!releaseSessionLock) {
+      try {
+        releaseSessionLock = acquireSessionLock('the WhatsApp daemon');
+      } catch (err) {
+        if (!(err instanceof SessionLockedError)) throw err;
+        setDisconnectedState('disconnected', null, `${err.message} Waiting for it to finish.`, null);
+        logger.warn({ holder: err.holderPid, role: err.holderRole }, 'Session lock held elsewhere; retrying in 30s');
+        scheduleReconnect(logger, 30_000);
+        return;
+      }
     }
 
     const { version } = await fetchLatestWaWebVersion({}).catch(() => {
@@ -273,7 +322,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
         sock = null;
         clearReconnectTimer();
 
-        if (stopping) {
+        if (stopping || loggingOut) {
           setDisconnectedState('disconnected', reason, 'Daemon shutting down.', null);
           logger.info({ reason, reasonName }, 'Connection closed during shutdown');
           return;
@@ -291,6 +340,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
         }
 
         if (reason === DisconnectReason.loggedOut) {
+          releaseLock();
           setDisconnectedState(
             'logged_out',
             reason,

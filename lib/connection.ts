@@ -38,6 +38,7 @@ import {
   getMessageEphemeralExpiration,
 } from './converters.js';
 import { ConnectionReadinessGate } from './readiness.js';
+import { advanceOutbox, stateForBaileysStatus } from './outbox.js';
 import {
   publishIncomingMessageNotification,
   publishOwnerAiCommandNotification,
@@ -96,6 +97,12 @@ export function getConnectionStatus(): ConnectionStatus {
     statusMessage,
     actionRequired,
   };
+}
+
+/** Test hook: install a fake socket and mark it connected. */
+export function setSocketForTest(fake: WASocket | null): void {
+  sock = fake;
+  resetConnectionStatus(fake ? 'connected' : 'disconnected');
 }
 
 export function prepareForShutdown(): void {
@@ -318,6 +325,40 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
     nextSock.ev.on('creds.update', () => {
       if (!isCurrentSocket(socketId, nextSock)) return;
       void saveCreds();
+    });
+
+    // ─── Outgoing message acknowledgements ─────────────────
+    // Baileys only surfaces error acks as events, so listen for the raw server
+    // ack to tell "written to the socket" apart from "accepted by WhatsApp".
+
+    nextSock.ws.on('CB:ack,class:message', (node: { attrs?: Record<string, string> }) => {
+      if (!isCurrentSocket(socketId, nextSock)) return;
+      const id = node.attrs?.id;
+      if (!id) return;
+      if (node.attrs?.error) advanceOutbox(id, 'failed', `WhatsApp error ${node.attrs.error}`);
+      else advanceOutbox(id, 'server_ack');
+    });
+
+    nextSock.ev.on('messages.update', (updates) => {
+      if (!isCurrentSocket(socketId, nextSock)) return;
+      for (const { key, update } of updates) {
+        if (!key?.id || !key.fromMe || update.status == null) continue;
+        const state = stateForBaileysStatus(update.status);
+        if (!state) continue;
+        const detail = state === 'failed'
+          ? `WhatsApp error ${String(update.messageStubParameters?.[0] ?? 'ack')}`
+          : null;
+        advanceOutbox(key.id, state, detail);
+      }
+    });
+
+    nextSock.ev.on('message-receipt.update', (receipts) => {
+      if (!isCurrentSocket(socketId, nextSock)) return;
+      for (const { key, receipt } of receipts) {
+        if (!key?.id || !key.fromMe) continue;
+        if (receipt.readTimestamp) advanceOutbox(key.id, 'read');
+        else if (receipt.receiptTimestamp) advanceOutbox(key.id, 'delivered');
+      }
     });
 
     // ─── History sync (older messages) ─────────────────────

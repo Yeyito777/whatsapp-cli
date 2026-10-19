@@ -4,7 +4,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { Logger } from 'pino';
-import { downloadMediaMessage, type WAMessage } from '@whiskeysockets/baileys';
+import { downloadMediaMessage, type AnyMessageContent, type WAMessage } from '@whiskeysockets/baileys';
 
 import {
   getMessagesForJids,
@@ -28,7 +28,18 @@ import {
 } from './db.js';
 import { describeMatch, resolveTarget, type ResolvedTarget } from './resolve.js';
 import { getSocket, getConnectionStatus, isConnected, waitForConnection } from './connection.js';
-import { deserializeRawMessage, equivalentJids } from './converters.js';
+import { deserializeRawMessage, equivalentJids, waMessageToStored } from './converters.js';
+import {
+  advanceOutbox,
+  generateOutgoingMessageId,
+  getOutboxEntry,
+  isSentState,
+  isValidOutgoingMessageId,
+  listOutbox,
+  recordSending,
+  waitForOutboxState,
+  type OutboxEntry,
+} from './outbox.js';
 import type {
   IpcRequest,
   IpcResponse,
@@ -61,7 +72,7 @@ function resolve(target: string): string {
 async function resolveSendTarget(target: string): Promise<ResolvedTarget> {
   const resolved = resolveTarget(target);
   if (resolved.match !== 'phone' || hasLocalChat(resolved.jid)) return resolved;
-  const results = await getSocket().onWhatsApp(resolved.jid);
+  const results = await withTimeout(getSocket().onWhatsApp(resolved.jid), METADATA_TIMEOUT_MS, 'WhatsApp number lookup');
   const hit = results?.find(r => r.exists);
   if (!hit) throw new Error(`${resolved.jid} is not a WhatsApp account; nothing was sent.`);
   return resolved;
@@ -72,6 +83,17 @@ function targetSummary(resolved: ResolvedTarget): { jid: string; name: string; m
 }
 
 const CONNECTION_READY_TIMEOUT_MS = 10_000;
+const METADATA_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
 
 async function requireConnected(req: IpcRequest): Promise<IpcResponse | null> {
   if (await waitForConnection(CONNECTION_READY_TIMEOUT_MS)) return null;
@@ -109,6 +131,7 @@ export async function handleCommand(req: IpcRequest): Promise<IpcResponse> {
       case 'alias_remove':  return cmdAliasRemove(req, params);
       case 'context':       return cmdContext(req);
       case 'resolve':       return cmdResolve(req, params);
+      case 'outbox':        return cmdOutbox(req, params);
       case 'ping':          return { id: req.id, result: 'pong' };
       case 'shutdown':      return cmdShutdown(req);
       default:
@@ -184,7 +207,7 @@ async function sendOptionsForChat(jid: string): Promise<Record<string, unknown> 
   // There is no equivalent public metadata query for 1:1 chats in Baileys.
   if (cachedExpiration == null && jid.endsWith('@g.us')) {
     try {
-      const metadata = await getSocket().groupMetadata(jid);
+      const metadata = await withTimeout(getSocket().groupMetadata(jid), METADATA_TIMEOUT_MS, 'group metadata');
       const metadataExpiration = metadata.ephemeralDuration;
       if (metadataExpiration != null) {
         upsertChat({ jid, ephemeral_expiration: metadataExpiration });
@@ -200,6 +223,78 @@ async function sendOptionsForChat(jid: string): Promise<Record<string, unknown> 
   return undefined;
 }
 
+const SERVER_ACK_WAIT_MS = Number(process.env.WHATSAPP_CLI_ACK_WAIT_MS) || 8_000;
+
+interface SendRequest {
+  messageId: string;
+  resolved: ResolvedTarget;
+  kind: OutboxEntry['kind'];
+  content: AnyMessageContent;
+  /** Local copy stored once the message is written (text sends). */
+  stored?: (sent: WAMessage) => StoredMessage | null;
+}
+
+/**
+ * Send with a pre-assigned message ID recorded in the outbox first. A repeat
+ * of an ID that already reached WhatsApp returns the recorded outcome without
+ * sending again.
+ */
+async function performSend(req: IpcRequest, send: SendRequest): Promise<IpcResponse> {
+  const { messageId, resolved } = send;
+  const existing = getOutboxEntry(messageId);
+  if (existing && existing.chat_jid !== resolved.jid) {
+    return { id: req.id, error: `Message ID ${messageId} was already used for ${existing.chat_jid}; nothing was sent.` };
+  }
+  if (existing && (isSentState(existing.state) || existing.state === 'sending')) {
+    return { id: req.id, result: sendResult(existing, resolved, true) };
+  }
+
+  recordSending(messageId, resolved.jid, send.kind);
+  let sent: WAMessage | undefined;
+  try {
+    const options = { ...(await sendOptionsForChat(resolved.jid)), messageId };
+    sent = await getSocket().sendMessage(resolved.jid, send.content, options);
+  } catch (err) {
+    // Baileys throws before the stanza is written (encryption, device lookup,
+    // media upload, socket closed): nothing reached WhatsApp.
+    const message = err instanceof Error ? err.message : String(err);
+    advanceOutbox(messageId, 'failed', message);
+    return { id: req.id, error: `Not sent (${message}).` };
+  }
+
+  advanceOutbox(messageId, 'written');
+  if (sent && send.stored) {
+    const stored = send.stored(sent);
+    if (stored) upsertMessage(stored);
+  }
+
+  const entry = await waitForOutboxState(messageId, 'server_ack', SERVER_ACK_WAIT_MS);
+  if (entry?.state === 'failed') {
+    return { id: req.id, error: `WhatsApp rejected the message (${entry.error ?? 'error ack'}).` };
+  }
+  return { id: req.id, result: sendResult(entry ?? getOutboxEntry(messageId)!, resolved, false) };
+}
+
+function sendResult(entry: OutboxEntry, resolved: ResolvedTarget, duplicate: boolean): Record<string, unknown> {
+  return {
+    status: entry.state,
+    id: entry.id,
+    jid: resolved.jid,
+    chat: targetSummary(resolved),
+    duplicate,
+    ...(entry.error ? { error: entry.error } : {}),
+  };
+}
+
+function requestMessageId(params?: Record<string, unknown>): string {
+  const provided = params?.message_id;
+  if (provided === undefined) return generateOutgoingMessageId();
+  if (typeof provided !== 'string' || !isValidOutgoingMessageId(provided)) {
+    throw new Error('Invalid message ID (expected 8-64 letters/digits).');
+  }
+  return provided;
+}
+
 async function cmdSend(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
   const err = await requireConnected(req);
   if (err) return err;
@@ -209,34 +304,24 @@ async function cmdSend(req: IpcRequest, params?: Record<string, unknown>): Promi
   if (!target) return { id: req.id, error: 'Missing target (JID or name)' };
   if (!text) return { id: req.id, error: 'Missing message text' };
 
+  const messageId = requestMessageId(params);
   const resolved = await resolveSendTarget(target);
-  const jid = resolved.jid;
-  const sock = getSocket();
-
   const replyTo = params?.reply_to as string | undefined;
-  const sendOpts: Record<string, unknown> = { text };
+  const content: Record<string, unknown> = { text };
   if (replyTo) {
-    sendOpts.contextInfo = {
+    content.contextInfo = {
       stanzaId: replyTo,
-      participant: jid.endsWith('@g.us') ? undefined : jid,
+      participant: resolved.jid.endsWith('@g.us') ? undefined : resolved.jid,
     };
   }
 
-  const sent = await sock.sendMessage(jid, sendOpts as { text: string }, await sendOptionsForChat(jid));
-  const sentMsg: StoredMessage = {
-    id: sent?.key?.id || `${Date.now()}`,
-    chat_jid: jid,
-    sender_jid: sock.user?.id || '',
-    sender_name: 'Me',
-    content: text,
-    timestamp: new Date().toISOString(),
-    is_from_me: true,
-    media_type: null,
-    media_caption: null,
-    quoted_id: replyTo || null,
-  };
-  upsertMessage(sentMsg);
-  return { id: req.id, result: { status: 'sent', id: sentMsg.id, jid, timestamp: sentMsg.timestamp, chat: targetSummary(resolved) } };
+  return performSend(req, {
+    messageId,
+    resolved,
+    kind: 'text',
+    content: content as AnyMessageContent,
+    stored: (sent) => waMessageToStored(sent),
+  });
 }
 
 async function cmdSendFile(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
@@ -250,14 +335,15 @@ async function cmdSendFile(req: IpcRequest, params?: Record<string, unknown>): P
   if (!filePath) return { id: req.id, error: 'Missing file path' };
   if (!fs.existsSync(filePath)) return { id: req.id, error: `File not found: ${filePath}` };
 
+  const messageId = requestMessageId(params);
   const resolved = await resolveSendTarget(target);
-  const jid = resolved.jid;
-  const sock = getSocket();
-  const buf = fs.readFileSync(filePath);
-  const sendPayload = buildFilePayload(filePath, buf, caption);
-
-  const sent = await sock.sendMessage(jid, sendPayload as Parameters<typeof sock.sendMessage>[1], await sendOptionsForChat(jid));
-  return { id: req.id, result: { status: 'sent', id: sent?.key?.id, jid, chat: targetSummary(resolved) } };
+  const buf = await fs.promises.readFile(filePath);
+  return performSend(req, {
+    messageId,
+    resolved,
+    kind: 'file',
+    content: buildFilePayload(filePath, buf, caption) as unknown as AnyMessageContent,
+  });
 }
 
 async function cmdDownloadMedia(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
@@ -602,6 +688,17 @@ function cmdContext(req: IpcRequest): IpcResponse {
       recent_groups: recentGroups,
     },
   };
+}
+
+function cmdOutbox(req: IpcRequest, params?: Record<string, unknown>): IpcResponse {
+  const id = params?.id as string | undefined;
+  if (id) {
+    const entry = getOutboxEntry(id);
+    if (!entry) return { id: req.id, error: `No outgoing message with ID ${id} (it never reached the daemon).` };
+    return { id: req.id, result: { ...entry, name: resolveDisplayName(entry.chat_jid) } };
+  }
+  const limit = (params?.limit as number) || 20;
+  return { id: req.id, result: listOutbox(limit).map(entry => ({ ...entry, name: resolveDisplayName(entry.chat_jid) })) };
 }
 
 function cmdShutdown(req: IpcRequest): IpcResponse {

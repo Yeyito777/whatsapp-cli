@@ -1,4 +1,4 @@
-import { getDb } from '../../lib/db.js';
+import { getDb } from '../../lib/db.ts';
 
 /** Empty every table in the isolated test DB. */
 export function resetDb(): void {

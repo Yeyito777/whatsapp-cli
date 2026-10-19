@@ -12,6 +12,7 @@ import pino from 'pino';
 
 import { CONFIG_DIR, RUNTIME_DIR, SOCKET_PATH, PID_FILE, LOG_FILE } from './paths.js';
 import { getDb } from './db.js';
+import { markInterruptedSendsUnknown } from './outbox.js';
 import { connectWhatsApp, getSocket, prepareForShutdown } from './connection.js';
 import { handleCommand, initHandlers } from './handlers.js';
 import { registerIncomingMessagesSource, registerOwnerAiCommandsSource } from './notifications.js';
@@ -109,7 +110,8 @@ async function main(): Promise<void> {
   fs.writeFileSync(PID_FILE, String(process.pid));
 
   getDb();
-  logger.info('Database initialized');
+  const interrupted = markInterruptedSendsUnknown();
+  logger.info({ interruptedSends: interrupted }, 'Database initialized');
 
   initHandlers(logger);
   const server = startIpcServer();

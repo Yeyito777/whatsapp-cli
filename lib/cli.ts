@@ -8,7 +8,8 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { sendCommand, isDaemonRunning } from './client.js';
+import { IpcOutcomeUnknownError, sendCommand, isDaemonRunning } from './client.js';
+import { generateOutgoingMessageId } from './message-id.js';
 import { LOG_FILE } from './paths.js';
 import {
   listExternalNotificationSubscriptions,
@@ -217,15 +218,63 @@ async function cmdSearch(args: string[]): Promise<void> {
   }
 }
 
+/** Exit code for "the send may or may not have happened". */
+const EXIT_OUTCOME_UNKNOWN = 75;
+const TEXT_SEND_TIMEOUT_MS = Number(process.env.WHATSAPP_CLI_SEND_TIMEOUT_MS) || 120_000;
+const FILE_SEND_TIMEOUT_MS = Number(process.env.WHATSAPP_CLI_SEND_TIMEOUT_MS) || 600_000;
+
+interface SendResult {
+  status: string;
+  id: string;
+  jid: string;
+  duplicate: boolean;
+  error?: string;
+  chat: ResolvedChatSummary;
+}
+
+function outcomeUnknown(messageId: string, target: string, reason: string): never {
+  console.error([
+    `OUTCOME UNKNOWN: ${reason}.`,
+    `The message (ID ${messageId}) may or may not have been sent to ${target}.`,
+    `Do not resend blindly. Check first: whatsapp outbox ${messageId}   (or: whatsapp messages ${JSON.stringify(target)})`,
+    `To retry safely, repeat the same command with --id ${messageId}; it will not send a second copy if the first one went out.`,
+  ].join('\n'));
+  process.exit(EXIT_OUTCOME_UNKNOWN);
+}
+
+function reportSend(result: SendResult, kind: 'message' | 'file', target: string): void {
+  if (jsonMode) {
+    console.log(formatJson(result));
+  } else {
+    const who = `${result.chat.name} <${result.chat.jid}> (matched by ${result.chat.match})`;
+    const confirmed = ['server_ack', 'delivered', 'read'].includes(result.status);
+    if (result.duplicate && result.status !== 'sending') {
+      console.log(`Already sent earlier with ID ${result.id} to ${who} (status: ${result.status}); not sent again.`);
+    } else if (confirmed) {
+      console.log(`Sent ${kind} to ${who}; WhatsApp server confirmed. ID: ${result.id}`);
+    } else if (result.status === 'written') {
+      console.log(`Sent ${kind} to ${who}; written to the WhatsApp connection, server confirmation still pending. ID: ${result.id} (check: whatsapp outbox ${result.id})`);
+    }
+  }
+  if (result.status === 'sending') {
+    outcomeUnknown(result.id, target, 'a send with this ID is still in progress');
+  }
+}
+
 async function cmdSend(args: string[]): Promise<void> {
   const help = [
     'usage:',
-    '  whatsapp send <target> [--reply <message_id>]',
-    '  whatsapp send <target> --file <path>',
+    '  whatsapp send <target> [--reply <message_id>] [--id <message_id>]',
+    '  whatsapp send <target> --file <path> [--id <message_id>]',
     '',
     'Message text is required as exact UTF-8 on stdin.',
     'With --file, stdin is the optional exact caption; empty stdin sends no caption.',
     'Inline text and --caption are not accepted.',
+    '',
+    'Every send gets a message ID before it leaves the CLI. If the outcome is',
+    `unknown (exit code ${EXIT_OUTCOME_UNKNOWN}), check \`whatsapp outbox <id>\` and retry only with`,
+    '--id <id>, which never sends a second copy of a message that went out.',
+    'Exit codes: 0 sent, 1 not sent, 2 usage error, 75 outcome unknown.',
   ].join('\n');
   if (args.includes('-h') || args.includes('--help')) {
     console.log(help);
@@ -234,37 +283,84 @@ async function cmdSend(args: string[]): Promise<void> {
 
   const structure = parseSendStructure(args);
   const stdin = await readStdinBytes();
+  const messageId = structure.messageId ?? generateOutgoingMessageId();
 
   if (structure.file) {
     const caption = decodeExactUtf8(stdin, 'file caption', { required: false });
     requireDaemon();
-    const result = await sendCommand('send_file', {
-      target: structure.target,
-      file: path.resolve(structure.file),
-      ...(caption !== undefined ? { caption } : {}),
-    });
-    if (jsonMode) {
-      console.log(formatJson(result));
-    } else {
-      const r = result as { chat: ResolvedChatSummary };
-      console.log(`Sent file to ${r.chat.name} <${r.chat.jid}> (matched by ${r.chat.match})`);
+    let result: SendResult;
+    try {
+      result = await sendCommand('send_file', {
+        target: structure.target,
+        file: path.resolve(structure.file),
+        message_id: messageId,
+        ...(caption !== undefined ? { caption } : {}),
+      }, FILE_SEND_TIMEOUT_MS) as SendResult;
+    } catch (err) {
+      if (err instanceof IpcOutcomeUnknownError) outcomeUnknown(messageId, structure.target, err.message);
+      throw err;
     }
+    reportSend(result, 'file', structure.target);
     return;
   }
 
   const text = decodeExactUtf8(stdin, 'message text')!;
   requireDaemon();
-  const result = await sendCommand('send', {
-    target: structure.target,
-    text,
-    reply_to: structure.replyTo,
-  });
-  if (jsonMode) {
-    console.log(formatJson(result));
-  } else {
-    const r = result as { chat: ResolvedChatSummary };
-    console.log(`Sent to ${r.chat.name} <${r.chat.jid}> (matched by ${r.chat.match})`);
+  let result: SendResult;
+  try {
+    result = await sendCommand('send', {
+      target: structure.target,
+      text,
+      reply_to: structure.replyTo,
+      message_id: messageId,
+    }, TEXT_SEND_TIMEOUT_MS) as SendResult;
+  } catch (err) {
+    if (err instanceof IpcOutcomeUnknownError) outcomeUnknown(messageId, structure.target, err.message);
+    throw err;
   }
+  reportSend(result, 'message', structure.target);
+}
+
+interface OutboxRow {
+  id: string;
+  chat_jid: string;
+  name: string;
+  kind: string;
+  state: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const OUTBOX_STATE_TEXT: Record<string, string> = {
+  sending: 'being sent right now',
+  written: 'written to the WhatsApp connection; no server confirmation yet',
+  server_ack: 'sent (WhatsApp server confirmed)',
+  delivered: 'sent and delivered to the recipient',
+  read: 'sent, delivered and read',
+  failed: 'NOT sent',
+  unknown: 'outcome unknown (the daemon stopped mid-send); check the chat before retrying',
+};
+
+function formatOutboxRow(row: OutboxRow): string {
+  const error = row.error ? ` — ${row.error}` : '';
+  return `${row.id}  ${row.kind} to ${row.name} <${row.chat_jid}>  ${row.created_at}\n  ${OUTBOX_STATE_TEXT[row.state] ?? row.state}${error}`;
+}
+
+async function cmdOutbox(args: string[]): Promise<void> {
+  if (args.includes('-h') || args.includes('--help')) {
+    console.log('usage: whatsapp outbox [message_id] [-n count]\n\nShows what happened to messages sent through this CLI.');
+    return;
+  }
+  requireDaemon();
+  const id = args.find((arg, index) => !arg.startsWith('-') && args[index - 1] !== '-n');
+  if (id) {
+    const row = await sendCommand('outbox', { id }) as OutboxRow;
+    output(row, () => formatOutboxRow(row));
+    return;
+  }
+  const rows = await sendCommand('outbox', { limit: parseLimit(args, 20) }) as OutboxRow[];
+  output(rows, () => rows.length === 0 ? 'No outgoing messages recorded.' : rows.map(formatOutboxRow).join('\n\n'));
 }
 
 async function cmdMedia(args: string[]): Promise<void> {
@@ -497,6 +593,7 @@ async function main(): Promise<void> {
       case 'search':
       case 's':         await cmdSearch(cmdArgs); break;
       case 'send':      await cmdSend(cmdArgs); break;
+      case 'outbox':    await cmdOutbox(cmdArgs); break;
       case 'media':     await cmdMedia(cmdArgs); break;
       case 'typing':    await cmdTyping(cmdArgs); break;
       case 'read':      await cmdRead(cmdArgs); break;

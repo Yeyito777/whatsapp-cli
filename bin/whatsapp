@@ -28,6 +28,7 @@ commands:
   sync         Force-sync group metadata
 
   send         Send stdin text, a file with optional stdin caption, or a reply
+  outbox       What happened to sent messages (sent / pending / failed / unknown)
   media        Media operations (download)
   typing       Show/hide typing indicator
   read         Mark chat as read
@@ -39,6 +40,11 @@ target: alias ("Mom"), phone number (1415...), JID, or chat name.
 
 payload input: send reads exact UTF-8 message text or file captions from stdin.
 Inline message/caption arguments are not accepted.
+
+send exit codes: 0 sent, 1 not sent, 2 usage, 75 outcome unknown — on 75 check
+'whatsapp outbox <id>' and retry only with --id <id> (never sends twice).
+Names must match one chat exactly (or be the only partial match); ambiguous
+names are refused with the candidate JIDs.
 
 Run 'whatsapp <command> --help' for command-specific usage.
 EOF
@@ -70,7 +76,7 @@ case "$cmd" in
         echo "Logged out. Auth credentials removed." ;;
     daemon)
         exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} daemon "$@" ;;
-    chats|groups|contacts|messages|msgs|search|s|send|media|typing|read|info|context|ctx|alias|sync|notify)
+    chats|groups|contacts|messages|msgs|search|s|send|outbox|media|typing|read|info|context|ctx|alias|sync|notify)
         exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} "$cmd" "$@" ;;
     help|--help|-h)
         usage ;;

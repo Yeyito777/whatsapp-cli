@@ -4,6 +4,7 @@ export interface SendStructure {
   target: string;
   file?: string;
   replyTo?: string;
+  messageId?: string;
 }
 
 export function parseSendStructure(args: string[]): SendStructure {
@@ -14,6 +15,7 @@ export function parseSendStructure(args: string[]): SendStructure {
 
   let file: string | undefined;
   let replyTo: string | undefined;
+  let messageId: string | undefined;
   const inlinePayload: string[] = [];
 
   for (let index = 1; index < args.length; index++) {
@@ -28,6 +30,14 @@ export function parseSendStructure(args: string[]): SendStructure {
       if (replyTo !== undefined) throw new PayloadUsageError('--reply may only be specified once');
       replyTo = args[++index];
       if (!replyTo) throw new PayloadUsageError('missing message ID after --reply');
+      continue;
+    }
+    if (arg === '--id') {
+      if (messageId !== undefined) throw new PayloadUsageError('--id may only be specified once');
+      messageId = args[++index];
+      if (!messageId || !/^[0-9A-Za-z]{8,64}$/.test(messageId)) {
+        throw new PayloadUsageError('--id needs the message ID from an earlier attempt (8-64 letters/digits)');
+      }
       continue;
     }
     if (arg === '--caption') {
@@ -45,7 +55,12 @@ export function parseSendStructure(args: string[]): SendStructure {
     throw new PayloadUsageError('--reply is not supported with --file');
   }
 
-  return { target, ...(file ? { file } : {}), ...(replyTo ? { replyTo } : {}) };
+  return {
+    target,
+    ...(file ? { file } : {}),
+    ...(replyTo ? { replyTo } : {}),
+    ...(messageId ? { messageId } : {}),
+  };
 }
 
 export function decodeExactUtf8(

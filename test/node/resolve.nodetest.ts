@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, test } from 'node:test';
 
-import { resolveDisplayName, setAlias, upsertChat, upsertContact } from '../../lib/db.js';
-import { registerLidMapping } from '../../lib/converters.js';
-import { resolveTarget, TargetResolutionError } from '../../lib/resolve.js';
+import { resolveDisplayName, setAlias, upsertChat, upsertContact } from '../../lib/db.ts';
+import { registerLidMapping } from '../../lib/converters.ts';
+import { resolveTarget, TargetResolutionError } from '../../lib/resolve.ts';
 import { resetDb } from './helpers.ts';
 
 function assertMatch(actual: object, expected: Record<string, unknown>): void {

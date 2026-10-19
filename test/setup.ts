@@ -8,6 +8,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsapp-cli-test-'));
 process.env.WHATSAPP_CLI_CONFIG_DIR = path.join(root, 'config');
 process.env.WHATSAPP_CLI_RUNTIME_DIR = path.join(root, 'runtime');
 process.env.EXOCORTEX_CONFIG_DIR = path.join(root, 'exocortex');
+process.env.WHATSAPP_CLI_ACK_WAIT_MS = '200';
 fs.mkdirSync(process.env.WHATSAPP_CLI_CONFIG_DIR, { recursive: true });
 
 process.on('exit', () => {

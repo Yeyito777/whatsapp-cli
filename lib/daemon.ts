@@ -13,14 +13,17 @@ import { createDaemonLogger } from './log-file.js';
 import { CONFIG_DIR, RUNTIME_DIR, SOCKET_PATH, PID_FILE, LOG_FILE } from './paths.js';
 import { getDb } from './db.js';
 import { markInterruptedSendsUnknown } from './outbox.js';
-import { connectWhatsApp, getSocket, prepareForShutdown } from './connection.js';
+import { connectWhatsApp, flushCredentialWrites, getSocket, prepareForShutdown } from './connection.js';
 import { handleCommand, initHandlers } from './handlers.js';
 import { registerIncomingMessagesSource, registerOwnerAiCommandsSource } from './notifications.js';
 import type { IpcRequest } from './types.js';
 
 // ─── Logger ────────────────────────────────────────────────
 
+// WhatsApp state (Signal keys, message history, logs) is owner-only.
+process.umask(0o077);
 fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+fs.chmodSync(CONFIG_DIR, 0o700);
 
 const logger = createDaemonLogger(LOG_FILE, process.env.WA_LOG_LEVEL || 'warn');
 
@@ -70,14 +73,17 @@ function startIpcServer(): net.Server {
 // ─── Lifecycle ─────────────────────────────────────────────
 
 function registerShutdown(server: net.Server): void {
+  let shuttingDown = false;
   const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info('Shutting down...');
     prepareForShutdown();
     server.close();
     try { fs.unlinkSync(SOCKET_PATH); } catch {}
     try { fs.unlinkSync(PID_FILE); } catch {}
     try { getSocket()?.end(undefined); } catch {}
-    process.exit(0);
+    void flushCredentialWrites().finally(() => process.exit(0));
   };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);

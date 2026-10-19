@@ -24,6 +24,10 @@ export function getDb(): Database.Database {
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
   db = new Database(DB_PATH);
   db.pragma('journal_mode = WAL');
+  // Message history is private: owner-only, including the WAL side files.
+  for (const file of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
+    try { fs.chmodSync(file, 0o600); } catch {}
+  }
   db.pragma('busy_timeout = 5000');
   initSchema();
   prepareStatements();

@@ -12,13 +12,13 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
-  useMultiFileAuthState,
   type WASocket,
   type WAVersion,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 
 import { AUTH_DIR } from './paths.js';
+import { loadSecureAuthState } from './auth-state.js';
 import { acquireSessionLock, hasLinkedSession, SessionLockedError } from './session-lock.js';
 import {
   upsertMessage,
@@ -247,6 +247,21 @@ function scheduleReconnect(logger: Logger, delayMs: number): void {
 
 // ─── Connect ───────────────────────────────────────────────
 
+// Credential saves run one at a time, in order; shutdown waits for them so a
+// restart never loses (or half-writes) the latest Signal state.
+let credentialWrites: Promise<void> = Promise.resolve();
+
+function queueCredentialSave(saveCreds: () => Promise<void>, logger: Logger): void {
+  credentialWrites = credentialWrites
+    .then(saveCreds)
+    .catch((err) => { logger.error({ err }, 'Failed to save WhatsApp credentials'); });
+}
+
+/** Wait (bounded) for queued credential writes; used before exiting. */
+export async function flushCredentialWrites(timeoutMs = 3_000): Promise<void> {
+  await Promise.race([credentialWrites, new Promise<void>(resolve => setTimeout(resolve, timeoutMs).unref())]);
+}
+
 let historyRepaired = false;
 
 /**
@@ -303,7 +318,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
     stopping = false;
     fs.mkdirSync(AUTH_DIR, { recursive: true });
 
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { state, saveCreds } = await loadSecureAuthState(AUTH_DIR, (message, file) => logger.warn({ file }, message));
 
     // Baileys persists LID↔phone mappings in its auth key store, but it does
     // not replay lid-mapping.update events after a daemon restart. Rehydrate
@@ -482,7 +497,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
 
     nextSock.ev.on('creds.update', () => {
       if (!isCurrentSocket(socketId, nextSock)) return;
-      void saveCreds();
+      queueCredentialSave(saveCreds, logger);
     });
 
     // ─── Outgoing message acknowledgements ─────────────────

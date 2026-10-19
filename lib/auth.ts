@@ -16,13 +16,13 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
-  useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import qrTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
 
 import { AUTH_DIR } from './paths.js';
+import { loadSecureAuthState } from './auth-state.js';
 import { isDaemonRunning, sendCommand } from './client.js';
 import { manageExternalToolDaemon } from './exocortex.js';
 import { acquireSessionLock, hasLinkedSession, SessionLockedError } from './session-lock.js';
@@ -38,6 +38,7 @@ const USAGE = `usage:
 Links this machine as a WhatsApp device. Refuses to run while a linked
 session is active (it would knock the running daemon offline).`;
 
+process.umask(0o077);
 const argv = process.argv.slice(2);
 if (argv.includes('-h') || argv.includes('--help') || argv[0] === 'help') {
   console.log(USAGE);
@@ -116,7 +117,7 @@ async function connectSocket(
   isReconnect = false,
   browserServer?: http.Server,
 ): Promise<void> {
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { state, saveCreds } = await loadSecureAuthState(AUTH_DIR);
 
   if (hasLinkedSession(state.creds) && !isReconnect) {
     console.log('✓ Already authenticated with WhatsApp');
@@ -207,7 +208,9 @@ async function connectSocket(
 
     if (connection === 'open') {
       console.log('\n✓ Successfully authenticated with WhatsApp!');
-      // Hand the session to the daemon: close ours first so only one connects.
+      // Hand the session to the daemon: persist the link, close ours first so
+      // only one connects.
+      await credentialWrites;
       try { sock.end(undefined); } catch {}
       await restartDaemonAfterLogin();
       if (browserServer) {
@@ -219,7 +222,11 @@ async function connectSocket(
     }
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', () => {
+    credentialWrites = credentialWrites.then(saveCreds).catch((err) => {
+      console.error('Failed to save WhatsApp credentials:', err instanceof Error ? err.message : String(err));
+    });
+  });
 }
 
 // ─── Main ────────────────────────────────────────────────────
@@ -235,6 +242,7 @@ async function restartDaemonAfterLogin(): Promise<void> {
 }
 
 let releaseLock: (() => void) | null = null;
+let credentialWrites: Promise<void> = Promise.resolve();
 
 /** Refuse to pair while another process owns this linked-device session. */
 async function ensureSessionIsFree(): Promise<void> {

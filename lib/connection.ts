@@ -262,6 +262,9 @@ export async function flushCredentialWrites(timeoutMs = 3_000): Promise<void> {
   await Promise.race([credentialWrites, new Promise<void>(resolve => setTimeout(resolve, timeoutMs).unref())]);
 }
 
+/** The daemon never marks the account online just by connecting. */
+export const PRESENCE_SOCKET_OPTIONS = { markOnlineOnConnect: false } as const;
+
 let historyRepaired = false;
 
 /**
@@ -402,6 +405,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
       logger: baileysLogger,
       browser: Browsers.macOS('Chrome'),
       syncFullHistory: true,
+      ...PRESENCE_SOCKET_OPTIONS,
     });
 
     sock = nextSock;
@@ -491,7 +495,10 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
           setOwnJid(nextSock.user.id);
         }
 
-        nextSock.sendPresenceUpdate('available').catch(() => {});
+        // Stay "offline" by default: a headless daemon that announces itself
+        // available makes the account look online 24/7 and can stop WhatsApp
+        // pushing notifications to the phone.
+        nextSock.sendPresenceUpdate('unavailable').catch(() => {});
       }
     });
 

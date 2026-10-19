@@ -572,7 +572,16 @@ async function cmdTyping(req: IpcRequest, params?: Record<string, unknown>): Pro
   if (!target) return { id: req.id, error: 'Missing target' };
 
   const jid = resolve(target);
-  await getSocket().sendPresenceUpdate(on ? 'composing' : 'paused', jid);
+  // WhatsApp only shows "typing…" from a client that is online, so go
+  // online just for the duration of the typing indicator.
+  const sock = getSocket();
+  if (on) {
+    await sock.sendPresenceUpdate('available');
+    await sock.sendPresenceUpdate('composing', jid);
+  } else {
+    await sock.sendPresenceUpdate('paused', jid);
+    await sock.sendPresenceUpdate('unavailable');
+  }
   return { id: req.id, result: { status: on ? 'typing' : 'paused', jid } };
 }
 

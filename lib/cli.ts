@@ -19,7 +19,21 @@ import {
   unsubscribeExternalNotification,
   type ExternalNotificationSubscription,
 } from './exocortex.js';
-import { INCOMING_MESSAGES_SOURCE, WHATSAPP_TOOL_NAME } from './notifications.js';
+import { INCOMING_MESSAGES_SOURCE, OWNER_AI_COMMANDS_SOURCE, WHATSAPP_TOOL_NAME } from './notifications.js';
+import { CONNECTION_HEALTH_SOURCE } from './health.js';
+
+const NOTIFY_SOURCES = {
+  messages: INCOMING_MESSAGES_SOURCE,
+  health: CONNECTION_HEALTH_SOURCE,
+  'owner-ai': OWNER_AI_COMMANDS_SOURCE,
+} as const;
+
+function notifySource(args: string[]): (typeof NOTIFY_SOURCES)[keyof typeof NOTIFY_SOURCES] {
+  const name = optionValue(args, ['--source']) ?? 'messages';
+  const source = NOTIFY_SOURCES[name as keyof typeof NOTIFY_SOURCES];
+  if (!source) die(`--source must be one of: ${Object.keys(NOTIFY_SOURCES).join(', ')}`);
+  return source;
+}
 import {
   PayloadUsageError,
   decodeExactUtf8,
@@ -98,7 +112,7 @@ function positionalValues(args: string[], start: number, optionsWithValues: stri
 }
 
 function formatNotificationSubscriptions(subscriptions: ExternalNotificationSubscription[]): string {
-  if (subscriptions.length === 0) return 'No incoming WhatsApp message notification subscriptions.';
+  if (subscriptions.length === 0) return 'No WhatsApp notification subscriptions.';
   return subscriptions.map(subscription => [
     `${subscription.sourceLabel} → ${subscription.convId}`,
     `  delivery: ${subscription.delivery}  ${subscription.enabled ? 'enabled' : 'disabled'}`,
@@ -151,8 +165,14 @@ async function cmdDaemon(args: string[]): Promise<void> {
         const child = spawn('tail', ['-f', logFile], { stdio: 'inherit' });
         child.on('exit', (code) => process.exit(code || 0));
       } else {
-        const content = fs.readFileSync(logFile, 'utf-8');
-        const allLines = content.trim().split('\n');
+        // Read only the tail; the log can be tens of megabytes.
+        const fd = fs.openSync(logFile, 'r');
+        const size = fs.fstatSync(fd).size;
+        const length = Math.min(size, 64 * 1024);
+        const buf = Buffer.alloc(length);
+        fs.readSync(fd, buf, 0, length, size - length);
+        fs.closeSync(fd);
+        const allLines = buf.toString('utf-8').trim().split('\n');
         console.log(allLines.slice(-30).join('\n'));
       }
       break;
@@ -528,17 +548,22 @@ async function cmdNotify(args: string[]): Promise<void> {
   const subcmd = args[0];
   const usage = [
     'Usage:',
-    '  whatsapp notify subscribe <conversation_id> [--delivery wake|inbox]  (alias: add)',
-    '  whatsapp notify unsubscribe <conversation_id>                       (alias: remove)',
+    '  whatsapp notify subscribe <conversation_id> [--delivery wake|inbox] [--source S]  (alias: add)',
+    '  whatsapp notify unsubscribe <conversation_id> [--source S]                       (alias: remove)',
     '  whatsapp notify unsubscribe --id <subscription_id>',
-    '  whatsapp notify list [conversation_id]',
+    '  whatsapp notify list [conversation_id] [--source S]',
+    '',
+    'Sources: messages (default; incoming messages), health (offline, logged out,',
+    'session conflict, recovered), owner-ai (your own /ai commands).',
+    'Health alerts also reach messages subscribers while nobody subscribes to health.',
   ].join('\n');
 
   switch (subcmd) {
     case 'subscribe':
     case 'add': {
-      const positional = positionalValues(args, 1, ['--delivery']);
+      const positional = positionalValues(args, 1, ['--delivery', '--source']);
       if (positional.length !== 1) die(usage);
+      const source = notifySource(args);
       const convId = positional[0];
       const deliveryValue = optionValue(args, ['--delivery']) ?? 'wake';
       if (deliveryValue !== 'wake' && deliveryValue !== 'inbox') {
@@ -546,9 +571,9 @@ async function cmdNotify(args: string[]): Promise<void> {
       }
       const subscription = await subscribeExternalNotification({
         toolName: WHATSAPP_TOOL_NAME,
-        sourceId: INCOMING_MESSAGES_SOURCE.id,
-        sourceLabel: INCOMING_MESSAGES_SOURCE.label,
-        sourceDescription: INCOMING_MESSAGES_SOURCE.description,
+        sourceId: source.id,
+        sourceLabel: source.label,
+        sourceDescription: source.description,
         convId,
         delivery: deliveryValue,
       });
@@ -560,8 +585,9 @@ async function cmdNotify(args: string[]): Promise<void> {
     case 'unsubscribe':
     case 'remove': {
       const subscriptionId = optionValue(args, ['--id', '--subscription-id']);
-      const positional = positionalValues(args, 1, ['--id', '--subscription-id', '--conv', '--conversation']);
+      const positional = positionalValues(args, 1, ['--id', '--subscription-id', '--conv', '--conversation', '--source']);
       if (positional.length > 1) die(usage);
+      const source = notifySource(args);
       const convOption = optionValue(args, ['--conv', '--conversation']);
       if (convOption && positional.length > 0) die('Specify the conversation once, either positionally or with --conv');
       const convId = convOption ?? positional[0];
@@ -571,7 +597,7 @@ async function cmdNotify(args: string[]): Promise<void> {
         ? await unsubscribeExternalNotification({ subscriptionId })
         : await unsubscribeExternalNotification({
             toolName: WHATSAPP_TOOL_NAME,
-            sourceId: INCOMING_MESSAGES_SOURCE.id,
+            sourceId: source.id,
             convId,
           });
       if (jsonMode) console.log(formatJson(result));
@@ -581,14 +607,15 @@ async function cmdNotify(args: string[]): Promise<void> {
 
     case 'list':
     case undefined: {
-      const positional = positionalValues(args, 1, ['--conv', '--conversation']);
+      const positional = positionalValues(args, 1, ['--conv', '--conversation', '--source']);
       if (positional.length > 1) die(usage);
       const convOption = optionValue(args, ['--conv', '--conversation']);
       if (convOption && positional.length > 0) die('Specify the conversation once, either positionally or with --conv');
       const convId = convOption ?? positional[0];
+      const listAll = !args.includes('--source');
       const subscriptions = await listExternalNotificationSubscriptions({
         toolName: WHATSAPP_TOOL_NAME,
-        sourceId: INCOMING_MESSAGES_SOURCE.id,
+        ...(listAll ? {} : { sourceId: notifySource(args).id }),
         ...(convId ? { convId } : {}),
       });
       output(subscriptions, data => formatNotificationSubscriptions(data as ExternalNotificationSubscription[]));

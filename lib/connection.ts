@@ -14,6 +14,7 @@ import makeWASocket, {
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
   type WASocket,
+  type WAVersion,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 
@@ -27,6 +28,8 @@ import {
   upsertContact,
   upsertContacts,
   kvSet,
+  kvGet,
+  kvDelete,
   getKnownLidJids,
   resolveDisplayName,
 } from './db.js';
@@ -39,6 +42,8 @@ import {
   getMessageEphemeralExpiration,
 } from './converters.js';
 import { ConnectionReadinessGate } from './readiness.js';
+import { backoffDelay, decideOnClose, NETWORK_BACKOFF } from './reconnect-policy.js';
+import { HealthMonitor } from './health.js';
 import { advanceOutbox, stateForBaileysStatus } from './outbox.js';
 import {
   publishIncomingMessageNotification,
@@ -67,6 +72,11 @@ let reconnectTimer: NodeJS.Timeout | null = null;
 let stopping = false;
 let releaseSessionLock: (() => void) | null = null;
 let loggingOut = false;
+let failureCount = 0;
+let conflictCount = 0;
+let health: HealthMonitor | null = null;
+let cachedWebVersion: { version: WAVersion | undefined; fetchedAt: number } | null = null;
+const WEB_VERSION_TTL_MS = 6 * 60 * 60_000;
 
 let connected = false;
 let connectionState: ConnectionState = 'disconnected';
@@ -110,6 +120,7 @@ export function setSocketForTest(fake: WASocket | null): void {
 
 export function prepareForShutdown(): void {
   stopping = true;
+  health?.quiet();
   clearReconnectTimer();
   readiness.cancel();
 }
@@ -129,6 +140,7 @@ function releaseLock(): void {
  */
 export async function logoutSession(logger: Logger): Promise<{ unlinked: boolean }> {
   loggingOut = true;
+  health?.quiet();
   clearReconnectTimer();
   let unlinked = false;
   const current = sock;
@@ -194,8 +206,11 @@ function scheduleReconnect(logger: Logger, delayMs: number): void {
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     void connectWhatsApp(logger).catch((err) => {
-      logger.error({ err }, 'Reconnection failed, retrying in 10s');
-      scheduleReconnect(logger, 10000);
+      failureCount++;
+      const delay = backoffDelay(failureCount, NETWORK_BACKOFF);
+      logger.error({ err, delayMs: delay }, 'Reconnection failed; retrying');
+      health?.disconnected(null, err instanceof Error ? err.message : String(err));
+      scheduleReconnect(logger, delay);
     });
   }, delayMs);
   reconnectTimer.unref?.();
@@ -203,8 +218,27 @@ function scheduleReconnect(logger: Logger, delayMs: number): void {
 
 // ─── Connect ───────────────────────────────────────────────
 
+/** WA Web version, fetched at most every few hours instead of on every reconnect. */
+async function webVersion(logger: Logger): Promise<WAVersion | undefined> {
+  if (cachedWebVersion && Date.now() - cachedWebVersion.fetchedAt < WEB_VERSION_TTL_MS) {
+    return cachedWebVersion.version;
+  }
+  const latest = await fetchLatestWaWebVersion({}).catch(() => null);
+  if (!latest?.version) {
+    logger.warn('Failed to fetch latest WA Web version, using cached/default');
+    return cachedWebVersion?.version;
+  }
+  cachedWebVersion = { version: latest.version, fetchedAt: Date.now() };
+  return latest.version;
+}
+
 export async function connectWhatsApp(logger: Logger): Promise<void> {
   if (connectPromise) return connectPromise;
+  health ??= new HealthMonitor(logger, undefined, undefined, undefined, {
+    get: kvGet,
+    set: kvSet,
+    delete: kvDelete,
+  });
 
   const thisConnect = (async () => {
     stopping = false;
@@ -248,6 +282,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
         'Run: whatsapp login',
       );
       releaseLock();
+      health?.loggedOut(null, 'No linked WhatsApp session on this machine.', 'The phone owner must link it: whatsapp login');
       logger.error('Not authenticated. Run: whatsapp login');
       return;
     }
@@ -265,10 +300,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
       }
     }
 
-    const { version } = await fetchLatestWaWebVersion({}).catch(() => {
-      logger.warn('Failed to fetch latest WA Web version, using default');
-      return { version: undefined };
-    });
+    const version = await webVersion(logger);
 
     const previousSock = sock;
     const socketId = ++activeSocketId;
@@ -328,35 +360,31 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
           return;
         }
 
-        if (reason === DisconnectReason.connectionReplaced) {
-          setDisconnectedState(
-            'conflict',
-            reason,
-            'WhatsApp session conflict: this linked-device session was replaced.',
-            'Run: whatsapp logout && whatsapp login',
-          );
-          logger.warn({ reason, reasonName }, 'Connection closed due to session conflict; not reconnecting');
-          return;
-        }
+        if (reason === DisconnectReason.connectionReplaced) conflictCount++;
+        else failureCount++;
+        const decision = decideOnClose(reason, { failures: failureCount, conflicts: conflictCount });
 
-        if (reason === DisconnectReason.loggedOut) {
+        if (decision.action === 'stop') {
+          // Reconnecting cannot fix this and retrying revoked credentials
+          // looks abusive; stay up (status keeps answering) and tell the owner.
           releaseLock();
-          setDisconnectedState(
-            'logged_out',
-            reason,
-            'WhatsApp logged this session out.',
-            'Run: whatsapp logout && whatsapp login',
-          );
-          logger.warn({ reason, reasonName }, 'Connection closed due to logout; not reconnecting');
+          setDisconnectedState('logged_out', reason, decision.message, decision.actionRequired);
+          health?.loggedOut(reason, decision.message, decision.actionRequired);
+          logger.warn({ reason, reasonName }, 'Connection closed for good; not reconnecting');
           return;
         }
 
-        setDisconnectedState('disconnected', reason, 'Connection closed.', null);
-        logger.info({ reason, reasonName, shouldReconnect: true }, 'Connection closed');
-        scheduleReconnect(logger, 3000);
+        setDisconnectedState(decision.state, reason, decision.message, decision.actionRequired);
+        if (decision.state === 'conflict') health?.conflict(decision.message, decision.actionRequired);
+        else health?.disconnected(reason, `${reasonName} (${reason ?? 'no code'})`);
+        logger.info({ reason, reasonName, delayMs: decision.delayMs, failureCount, conflictCount }, 'Connection closed; will reconnect');
+        scheduleReconnect(logger, decision.delayMs);
       } else if (connection === 'open') {
         resetConnectionStatus('connected');
         clearReconnectTimer();
+        failureCount = 0;
+        conflictCount = 0;
+        health?.connected();
         logger.info('Connected to WhatsApp');
 
         if (nextSock.user) {

@@ -8,7 +8,7 @@
  */
 import fs from 'fs';
 import net from 'net';
-import pino from 'pino';
+import { createDaemonLogger } from './log-file.js';
 
 import { CONFIG_DIR, RUNTIME_DIR, SOCKET_PATH, PID_FILE, LOG_FILE } from './paths.js';
 import { getDb } from './db.js';
@@ -20,17 +20,9 @@ import type { IpcRequest } from './types.js';
 
 // ─── Logger ────────────────────────────────────────────────
 
-fs.mkdirSync(CONFIG_DIR, { recursive: true });
+fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
 
-const logger = pino({
-  level: process.env.WA_LOG_LEVEL || 'warn',
-  transport: {
-    targets: [
-      { target: 'pino/file', options: { destination: LOG_FILE }, level: 'debug' },
-      { target: 'pino/file', options: { destination: 1 }, level: 'info' },
-    ],
-  },
-});
+const logger = createDaemonLogger(LOG_FILE, process.env.WA_LOG_LEVEL || 'warn');
 
 // ─── IPC Server ────────────────────────────────────────────
 

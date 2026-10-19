@@ -490,3 +490,7 @@ export function kvGet(key: string): string | undefined {
 export function kvSet(key: string, value: string): void {
   stmts.kvSet.run(key, value);
 }
+
+export function kvDelete(key: string): void {
+  getDb().prepare('DELETE FROM kv WHERE key = ?').run(key);
+}

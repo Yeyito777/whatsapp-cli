@@ -9,7 +9,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { sendCommand, isDaemonRunning } from './client.js';
-import { PROJECT_ROOT } from './paths.js';
+import { LOG_FILE } from './paths.js';
 import {
   listExternalNotificationSubscriptions,
   manageExternalToolDaemon,
@@ -139,7 +139,7 @@ async function cmdDaemon(args: string[]): Promise<void> {
 
     case 'log':
     case 'logs': {
-      const logFile = path.join(PROJECT_ROOT, 'config', 'daemon.log');
+      const logFile = LOG_FILE;
       if (!fs.existsSync(logFile)) {
         console.log('No log file found');
         return;

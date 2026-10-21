@@ -32,6 +32,7 @@ import {
   kvGet,
   kvDelete,
   getKnownLidJids,
+  getMessageInChat,
   resolveDisplayName,
 } from './db.js';
 import {
@@ -603,6 +604,11 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
           continue;
         }
 
+        // A copy the phone resent on request has no push name; keep the stored one.
+        const refetched = takeRefetch(msg.key.id);
+        if (refetched && !msg.pushName && !stored.is_from_me) {
+          stored.sender_name = getMessageInChat(stored.id, stored.chat_jid)?.sender_name || stored.sender_name;
+        }
         upsertMessage(stored);
         applyHistoryMutations([msg as HistoryMessageLike]);
 
@@ -626,7 +632,7 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
         // A message we asked the phone to resend was already notified.
         const sentByUs = Boolean(msg.key.id && getOutboxEntry(msg.key.id));
         const timestampMs = Number(msg.messageTimestamp) * 1000;
-        const publishType = takeRefetch(msg.key.id)
+        const publishType = refetched
           ? 'refetch'
           : notificationUpsertType({ upsertType: type, sentByThisClient: sentByUs, timestampMs, window: catchUp });
         if (shouldPublishIncomingMessage({

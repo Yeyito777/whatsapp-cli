@@ -23,7 +23,10 @@ export function awaitRefetch(messageId: string, timeoutMs: number): Promise<bool
   });
 }
 
-/** True (once) when this upserted message is the answer to a refetch. */
+/**
+ * True (once) when this upserted message is the answer to a refetch. Call it
+ * before storing: the waiter runs only after the synchronous handler ends.
+ */
 export function takeRefetch(messageId: string | null | undefined): boolean {
   if (!messageId) return false;
   const done = pending.get(messageId);

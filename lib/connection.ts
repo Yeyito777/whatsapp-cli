@@ -69,6 +69,7 @@ import {
   shouldPublishOwnerAiCommand,
 } from './notifications.js';
 import { isVoiceNote, transcribeVoiceNote } from './transcription.js';
+import { takeRefetch } from './refetch.js';
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'conflict' | 'logged_out';
 
@@ -622,9 +623,12 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
         // Baileys uses "notify" for live arrivals and "append" both for
         // history and for messages queued while we were offline. The latter
         // are new, so they publish too when newer than our last-live mark.
+        // A message we asked the phone to resend was already notified.
         const sentByUs = Boolean(msg.key.id && getOutboxEntry(msg.key.id));
         const timestampMs = Number(msg.messageTimestamp) * 1000;
-        const publishType = notificationUpsertType({ upsertType: type, sentByThisClient: sentByUs, timestampMs, window: catchUp });
+        const publishType = takeRefetch(msg.key.id)
+          ? 'refetch'
+          : notificationUpsertType({ upsertType: type, sentByThisClient: sentByUs, timestampMs, window: catchUp });
         if (shouldPublishIncomingMessage({
           upsertType: publishType,
           rawChatJid,

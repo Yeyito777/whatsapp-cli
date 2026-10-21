@@ -455,6 +455,14 @@ async function cmdMedia(args: string[]): Promise<void> {
   }
 }
 
+async function cmdRefetch(args: string[]): Promise<void> {
+  requireDaemon();
+  const messageId = args[0];
+  if (!messageId) die(COMMAND_HELP.refetch);
+  const result = await sendCommand('refetch', { message_id: messageId }, 90_000) as { message: StoredMessage };
+  output(result, () => `Refetched.\n${formatMessages([result.message])}`);
+}
+
 async function cmdTyping(args: string[]): Promise<void> {
   requireDaemon();
   const target = args[0];
@@ -645,7 +653,8 @@ const COMMAND_HELP: Record<string, string> = {
   contacts: 'usage: whatsapp contacts',
   messages: 'usage: whatsapp messages <target> [-n count]\n\nPrints which chat the target resolved to, then its messages (oldest first).\nJSON: {"chat": {...}, "messages": [...]}.',
   search: 'usage: whatsapp search <query> [-n count]',
-  media: 'usage: whatsapp media download <message_id> <outdir>',
+  media: 'usage: whatsapp media download <message_id> <outdir>\n\nSaves the message\'s media; for a shared contact card, its vCard as a .vcf file.',
+  refetch: 'usage: whatsapp refetch <message_id>\n\nAsks your own phone to resend a stored message and stores it again, e.g. to fill in\nmessages saved before their type was understood. Nothing is sent to the chat.',
   typing: 'usage: whatsapp typing <target> on|off',
   read: 'usage: whatsapp read <target>\n\nMarks the latest incoming message in the chat as read.',
   info: 'usage: whatsapp info <group>',
@@ -689,6 +698,7 @@ async function main(): Promise<void> {
       case 'send':      await cmdSend(cmdArgs); break;
       case 'outbox':    await cmdOutbox(cmdArgs); break;
       case 'media':     await cmdMedia(cmdArgs); break;
+      case 'refetch':   await cmdRefetch(cmdArgs); break;
       case 'typing':    await cmdTyping(cmdArgs); break;
       case 'read':      await cmdRead(cmdArgs); break;
       case 'info':      await cmdInfo(cmdArgs); break;

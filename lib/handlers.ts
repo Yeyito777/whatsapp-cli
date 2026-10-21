@@ -33,6 +33,7 @@ import { describeMatch, resolveTarget, type ResolvedTarget } from './resolve.js'
 import { getSocket, getConnectionStatus, isConnected, logoutSession, waitForConnection } from './connection.js';
 import { deserializeRawMessage, equivalentJids, getOwnJid, waMessageToStored } from './converters.js';
 import { contactsVcf } from './vcard.js';
+import { awaitRefetch } from './refetch.js';
 import {
   advanceOutbox,
   generateOutgoingMessageId,
@@ -127,6 +128,7 @@ export async function handleCommand(req: IpcRequest): Promise<IpcResponse> {
       case 'send':          return await cmdSend(req, params);
       case 'send_file':     return await cmdSendFile(req, params);
       case 'download_media':return await cmdDownloadMedia(req, params);
+      case 'refetch':       return await cmdRefetch(req, params);
       case 'typing':        return await cmdTyping(req, params);
       case 'mark_read':     return await cmdMarkRead(req, params);
       case 'group_info':    return await cmdGroupInfo(req, params);
@@ -454,6 +456,44 @@ async function cmdDownloadMedia(req: IpcRequest, params?: Record<string, unknown
       size_bytes: buffer.length,
     },
   };
+}
+
+const REFETCH_WAIT_MS = 20_000;
+
+/**
+ * Ask our own phone to resend a stored message and re-store it. Only our
+ * phone sees the request: nothing is sent to the chat and no receipts change.
+ */
+async function cmdRefetch(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
+  const err = await requireConnected(req);
+  if (err) return err;
+
+  const messageId = params?.message_id as string;
+  if (!messageId) return { id: req.id, error: 'Missing message ID' };
+  const { chat_jid } = getMessageMediaById(messageId);
+  const row = getMessageInChat(messageId, chat_jid);
+  if (!row) return { id: req.id, error: `Message "${messageId}" not found.` };
+
+  const sock = getSocket();
+  const isGroup = chat_jid.endsWith('@g.us');
+  // The phone may know the chat by its phone JID or its LID; try both.
+  for (const remoteJid of new Set(equivalentJids(chat_jid))) {
+    const arrived = awaitRefetch(messageId, REFETCH_WAIT_MS);
+    await sock.requestPlaceholderResend({
+      remoteJid,
+      fromMe: row.is_from_me,
+      id: messageId,
+      ...(isGroup && !row.is_from_me && row.sender_jid ? { participant: row.sender_jid } : {}),
+    });
+    if (await arrived) {
+      // The upsert handler stores the copy before it resolves the wait.
+      const { raw_message_json: _raw, ...message } = getMessageInChat(messageId, chat_jid) ?? row;
+      logger.info({ messageId, remoteJid }, 'Message refetched from phone');
+      return { id: req.id, result: { status: 'refetched', message } };
+    }
+    logger.info({ messageId, remoteJid }, 'Phone did not resend message');
+  }
+  return { id: req.id, error: `The phone did not resend message "${messageId}" (it may be offline, or no longer have it).` };
 }
 
 /** Contact cards are stored locally: write their vCards as a .vcf file. */

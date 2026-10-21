@@ -30,6 +30,7 @@ commands:
   send         Send stdin text, a file with optional stdin caption, or a reply
   outbox       What happened to sent messages (sent / pending / failed / unknown)
   media        Media operations (download)
+  refetch      Ask your phone to resend a stored message (repairs old rows)
   typing       Show/hide typing indicator
   read         Mark chat as read
 
@@ -75,7 +76,7 @@ case "$cmd" in
         exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} logout "$@" ;;
     daemon)
         exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} daemon "$@" ;;
-    chats|groups|contacts|messages|msgs|search|s|send|outbox|media|typing|read|info|context|ctx|alias|sync|notify)
+    chats|groups|contacts|messages|msgs|search|s|send|outbox|media|refetch|typing|read|info|context|ctx|alias|sync|notify)
         exec "$TSX" "$PROJECT_DIR/lib/cli.ts" ${json_arg:+"$json_arg"} "$cmd" "$@" ;;
     help|--help|-h)
         usage ;;

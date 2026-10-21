@@ -8,6 +8,7 @@ import { normalizeMessageContent, proto } from '@whiskeysockets/baileys';
 
 import type { StoredMessage, StoredChat, StoredContact } from './types.js';
 import { jidLabel } from './jid.js';
+import { contactsSummary } from './vcard.js';
 
 // ─── JID Translation ───────────────────────────────────────
 
@@ -143,7 +144,7 @@ export function waMessageToStored(msg: proto.IWebMessageInfo): StoredMessage | n
     media_type: media.type,
     media_caption: media.caption,
     quoted_id: quotedId,
-    raw_message_json: isDownloadableMediaType(media.type) ? serializeRawMessage(msg) : null,
+    raw_message_json: isDownloadableMediaType(media.type) || media.type === 'contact' ? serializeRawMessage(msg) : null,
     media_file_name: media.fileName,
     media_mime_type: media.mimeType,
   };
@@ -255,9 +256,11 @@ function getMediaInfo(normalized: proto.IMessage): {
   }
 
   if (normalized.contactMessage || normalized.contactsArrayMessage) {
+    // The readable contact lines act as the caption; the vCards themselves
+    // stay in the stored raw message.
     return {
       type: 'contact',
-      caption: null,
+      caption: contactsSummary(normalized) || null,
       fileName: null,
       mimeType: null,
     };

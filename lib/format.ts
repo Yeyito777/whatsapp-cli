@@ -121,7 +121,9 @@ export function formatMessages(messages: StoredMessage[], chat?: ResolvedChatSum
       ? '[deleted]'
       : (msg.content || (msg.media_type ? `[${msg.media_type}]` : '')) + (msg.edited_at ? ' (edited)' : '');
 
-    lines.push(`[${time}] ${reply}${sender}: ${msg.deleted_at ? '' : media}${content}`);
+    // Contact lines already carry their own icon, one per shared contact.
+    const icon = msg.deleted_at || content.startsWith(media) ? '' : media;
+    lines.push(`[${time}] ${reply}${sender}: ${icon}${content}`);
     if (msg.reactions?.length) {
       lines.push(`  reactions: ${msg.reactions.map(r => `${r.emoji} ${r.from_name}`).join(', ')}`);
     }

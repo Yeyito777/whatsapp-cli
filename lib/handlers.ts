@@ -4,7 +4,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { Logger } from 'pino';
-import { downloadMediaMessage, type AnyMessageContent, type WAMessage } from '@whiskeysockets/baileys';
+import { downloadMediaMessage, normalizeMessageContent, type AnyMessageContent, type WAMessage } from '@whiskeysockets/baileys';
 
 import {
   getMessagesForJids,
@@ -32,6 +32,7 @@ import {
 import { describeMatch, resolveTarget, type ResolvedTarget } from './resolve.js';
 import { getSocket, getConnectionStatus, isConnected, logoutSession, waitForConnection } from './connection.js';
 import { deserializeRawMessage, equivalentJids, getOwnJid, waMessageToStored } from './converters.js';
+import { contactsVcf } from './vcard.js';
 import {
   advanceOutbox,
   generateOutgoingMessageId,
@@ -47,6 +48,7 @@ import type {
   IpcRequest,
   IpcResponse,
   StoredMessage,
+  StoredMediaMessage,
   Alias,
   DaemonStatus,
   GroupInfo,
@@ -398,15 +400,16 @@ async function cmdSendFile(req: IpcRequest, params?: Record<string, unknown>): P
 }
 
 async function cmdDownloadMedia(req: IpcRequest, params?: Record<string, unknown>): Promise<IpcResponse> {
-  const err = await requireConnected(req);
-  if (err) return err;
-
   const messageId = params?.message_id as string;
   const outDir = params?.outdir as string;
   if (!messageId) return { id: req.id, error: 'Missing message ID' };
   if (!outDir) return { id: req.id, error: 'Missing output directory' };
 
   const mediaMsg = getMessageMediaById(messageId);
+  if (mediaMsg.media_type === 'contact') return saveContactCard(req, mediaMsg, outDir);
+
+  const err = await requireConnected(req);
+  if (err) return err;
   if (!isDownloadableMediaType(mediaMsg.media_type)) {
     return { id: req.id, error: `Message "${messageId}" does not have downloadable media.` };
   }
@@ -449,6 +452,39 @@ async function cmdDownloadMedia(req: IpcRequest, params?: Record<string, unknown
       file_name: path.basename(outputPath),
       path: outputPath,
       size_bytes: buffer.length,
+    },
+  };
+}
+
+/** Contact cards are stored locally: write their vCards as a .vcf file. */
+function saveContactCard(req: IpcRequest, mediaMsg: StoredMediaMessage, outDir: string): IpcResponse {
+  const vcf = mediaMsg.raw_message_json
+    ? contactsVcf(normalizeMessageContent(deserializeRawMessage(mediaMsg.raw_message_json).message ?? undefined))
+    : '';
+  if (!vcf) {
+    return {
+      id: req.id,
+      error: `The vCard for contact message "${mediaMsg.id}" is unavailable. The message may have been stored before contact-card support was added.`,
+    };
+  }
+
+  ensureDirectory(outDir);
+  const outputPath = uniquePath(path.join(outDir, `wa-${mediaMsg.id}.vcf`));
+  fs.writeFileSync(outputPath, vcf);
+  const size = Buffer.byteLength(vcf);
+  logger.info({ messageId: mediaMsg.id, outputPath, bytes: size }, 'Contact card saved');
+
+  return {
+    id: req.id,
+    result: {
+      status: 'downloaded',
+      message_id: mediaMsg.id,
+      chat_jid: mediaMsg.chat_jid,
+      media_type: 'contact',
+      mime_type: 'text/vcard',
+      file_name: path.basename(outputPath),
+      path: outputPath,
+      size_bytes: size,
     },
   };
 }

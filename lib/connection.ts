@@ -10,6 +10,7 @@ import type { Logger } from 'pino';
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  downloadMediaMessage,
   fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   type WASocket,
@@ -67,6 +68,7 @@ import {
   shouldPublishIncomingMessage,
   shouldPublishOwnerAiCommand,
 } from './notifications.js';
+import { isVoiceNote, transcribeVoiceNote } from './transcription.js';
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'conflict' | 'logged_out';
 
@@ -629,7 +631,18 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
           platformMessageId: msg.key.id,
           isFromMe: stored.is_from_me,
         })) {
-          void publishIncomingMessageNotification(stored, resolveDisplayName(stored.chat_jid)).catch((err) => {
+          const voiceNote = isVoiceNote(msg) ? msg : null;
+          void publishIncomingMessageNotification(stored, resolveDisplayName(stored.chat_jid), {
+            ...(voiceNote ? {
+              transcribeVoiceNote: () => transcribeVoiceNote(
+                () => downloadMediaMessage(voiceNote, 'buffer', {}, {
+                  logger,
+                  reuploadRequest: (message) => nextSock.updateMediaMessage(message),
+                }),
+                stored.media_mime_type ?? null,
+              ),
+            } : {}),
+          }).catch((err) => {
             logger.warn({ err, messageId: stored.id, chat: stored.chat_jid }, 'Failed to publish incoming-message notification');
           });
         } else if (shouldPublishOwnerAiCommand({

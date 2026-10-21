@@ -23,7 +23,16 @@ const recentEventIds = new Set<string>();
 let incomingSourceRegistered = false;
 let ownerAiSourceRegistered = false;
 
-function messageContent(message: StoredMessage): string {
+/**
+ * A voice note's transcript: a string, null when transcription failed, or
+ * undefined when the message is not a voice note.
+ */
+export type VoiceTranscript = string | null | undefined;
+
+function messageContent(message: StoredMessage, voiceTranscript?: VoiceTranscript): string {
+  if (voiceTranscript !== undefined) {
+    return voiceTranscript ? `🎤 ${voiceTranscript}` : '🎤 voice message (transcription failed)';
+  }
   return message.content || message.media_caption || (message.media_type ? `[${message.media_type}]` : '[message]');
 }
 
@@ -91,7 +100,11 @@ export function resetIncomingMessageEventDedupeForTest(): void {
   ownerAiSourceRegistered = false;
 }
 
-export function formatIncomingMessageNotification(message: StoredMessage, chatName: string): string {
+export function formatIncomingMessageNotification(
+  message: StoredMessage,
+  chatName: string,
+  voiceTranscript?: VoiceTranscript,
+): string {
   const sender = conciseMetadata(message.sender_name || message.sender_jid);
   const chat = conciseMetadata(chatName || message.chat_jid);
   const reply = message.quoted_id ? ` ↳ [reply-to:${conciseMetadata(message.quoted_id)}]` : '';
@@ -99,7 +112,7 @@ export function formatIncomingMessageNotification(message: StoredMessage, chatNa
     `${chat} [chat:${conciseMetadata(message.chat_jid)}]`,
     '',
     `→ ${sender} <${conciseMetadata(message.sender_jid)}>${reply}:`,
-    messageContent(message),
+    messageContent(message, voiceTranscript),
     `[msg:${conciseMetadata(message.id)}]`,
   ].join('\n');
 }
@@ -116,7 +129,11 @@ export function formatOwnerAiCommandNotification(message: StoredMessage, ownerJi
   ].join('\n');
 }
 
-export function incomingMessageNotificationData(message: StoredMessage, chatName: string): Record<string, unknown> {
+export function incomingMessageNotificationData(
+  message: StoredMessage,
+  chatName: string,
+  voiceTranscript?: VoiceTranscript,
+): Record<string, unknown> {
   return {
     schemaVersion: 1,
     kind: 'incoming_message',
@@ -130,9 +147,13 @@ export function incomingMessageNotificationData(message: StoredMessage, chatName
       id: message.sender_jid,
       name: message.sender_name || message.sender_jid,
     },
-    content: messageContent(message),
+    content: messageContent(message, voiceTranscript),
     replyTo: message.quoted_id ? { messageId: message.quoted_id } : null,
-    media: message.media_type ? { type: message.media_type, caption: message.media_caption } : null,
+    media: message.media_type ? {
+      type: message.media_type,
+      caption: message.media_caption,
+      ...(voiceTranscript !== undefined ? { voiceNote: true, transcript: voiceTranscript } : {}),
+    } : null,
   };
 }
 
@@ -163,19 +184,24 @@ export async function registerOwnerAiCommandsSource(): ReturnType<typeof registe
 export async function publishIncomingMessageNotification(
   message: StoredMessage,
   chatName: string,
+  options: { transcribeVoiceNote?: () => Promise<string | null> } = {},
 ): Promise<ExternalNotificationPublishResult | null> {
   const eventId = incomingMessageEventId(message);
   if (!claimIncomingMessageEvent(eventId)) return null;
 
   try {
+    // Transcribe after claiming, so a repeated delivery is not transcribed twice.
+    const voiceTranscript = options.transcribeVoiceNote
+      ? await options.transcribeVoiceNote().catch(() => null)
+      : undefined;
     if (!incomingSourceRegistered) await registerIncomingMessagesSource();
     const occurredAt = Date.parse(message.timestamp);
     const result = await publishExternalNotification({
       toolName: WHATSAPP_TOOL_NAME,
       sourceId: INCOMING_MESSAGES_SOURCE.id,
       eventId,
-      text: formatIncomingMessageNotification(message, chatName),
-      data: incomingMessageNotificationData(message, chatName),
+      text: formatIncomingMessageNotification(message, chatName, voiceTranscript),
+      data: incomingMessageNotificationData(message, chatName, voiceTranscript),
       ...(Number.isFinite(occurredAt) ? { occurredAt } : {}),
     });
     const failures = result.deliveries.filter(delivery => delivery.status === 'failed');

@@ -1,3 +1,4 @@
+import './setup.js';
 import { describe, expect, test } from 'bun:test';
 
 import { awaitRefetch, takeRefetch } from '../lib/refetch.js';

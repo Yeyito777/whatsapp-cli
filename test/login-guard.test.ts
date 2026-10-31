@@ -1,3 +1,4 @@
+import './setup.js';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import fs from 'fs';

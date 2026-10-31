@@ -1,3 +1,4 @@
+import '../setup.ts';
 import { getDb } from '../../lib/db.ts';
 
 /** Empty every table in the isolated test DB. */

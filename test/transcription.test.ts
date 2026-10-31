@@ -1,3 +1,4 @@
+import './setup.js';
 import fs from 'fs';
 import { describe, expect, test } from 'bun:test';
 

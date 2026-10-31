@@ -1,3 +1,4 @@
+import './setup.js';
 import { afterEach, describe, expect, test } from 'bun:test';
 import fs from 'fs';
 import net from 'net';

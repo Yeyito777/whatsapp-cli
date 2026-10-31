@@ -1,3 +1,4 @@
+import './setup.js';
 import { describe, expect, test } from 'bun:test';
 
 import { CATCH_UP_SLACK_MS, CatchUpWindow, notificationUpsertType } from '../lib/catch-up.js';

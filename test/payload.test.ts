@@ -1,3 +1,4 @@
+import './setup.js';
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'child_process';
 import { resolve } from 'path';

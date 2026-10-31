@@ -1,3 +1,4 @@
+import './setup.js';
 import { describe, expect, test } from 'bun:test';
 
 import { equivalentJids, registerLidMapping, translateJid } from '../lib/converters.js';

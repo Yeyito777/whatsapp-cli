@@ -1,3 +1,4 @@
+import '../setup.ts';
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import pino from 'pino';

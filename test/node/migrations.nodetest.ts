@@ -1,3 +1,4 @@
+import '../setup.ts';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { beforeEach, describe, test } from 'node:test';

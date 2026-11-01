@@ -162,6 +162,8 @@ async function connectSocket(
     }, 3000);
   }
 
+  let handedOff = false;
+
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -182,6 +184,8 @@ async function connectSocket(
     }
 
     if (connection === 'close') {
+      // Our own hand-off to the daemon closes this socket: it isn't a failure.
+      if (handedOff) return;
       const reason = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode;
 
       if (reason === DisconnectReason.loggedOut) {
@@ -210,6 +214,7 @@ async function connectSocket(
       console.log('\n✓ Successfully authenticated with WhatsApp!');
       // Hand the session to the daemon: persist the link, close ours first so
       // only one connects.
+      handedOff = true;
       await credentialWrites;
       try { sock.end(undefined); } catch {}
       await restartDaemonAfterLogin();

@@ -456,6 +456,13 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
 
         if (reason === DisconnectReason.connectionReplaced) conflictCount++;
         else failureCount++;
+        // A 405 after a network change (e.g. a reboot) comes from the stored edge
+        // routing hint: WhatsApp keeps refusing it until it's dropped.
+        if (reason === 405 && state.creds.routingInfo) {
+          delete state.creds.routingInfo;
+          queueCredentialSave(saveCreds, logger);
+          logger.warn({ reason }, 'Dropped stale edge routing info after 405');
+        }
         const decision = decideOnClose(reason, { failures: failureCount, conflicts: conflictCount });
 
         if (decision.action === 'stop') {

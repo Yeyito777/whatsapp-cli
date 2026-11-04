@@ -28,6 +28,17 @@ describe('WhatsApp send stdin payloads', () => {
     });
   });
 
+  test('--sticker takes a .webp and excludes --file and --reply', () => {
+    expect(parseSendStructure(['Me', '--sticker', './dog.webp'])).toEqual({
+      target: 'Me',
+      file: './dog.webp',
+      sticker: true,
+    });
+    expect(() => parseSendStructure(['Me', '--sticker', 'dog.png'])).toThrow('--sticker needs a .webp file');
+    expect(() => parseSendStructure(['Me', '--sticker', 'a.webp', '--file', 'b.jpg'])).toThrow('only one of --file or --sticker');
+    expect(() => parseSendStructure(['Me', '--sticker', 'a.webp', '--reply', 'm1'])).toThrow('--reply is not supported with --sticker');
+  });
+
   test('rejects legacy inline message and caption forms', () => {
     expect(() => parseSendStructure(['Mom', 'inline message'])).toThrow(
       'message text must be provided via stdin; inline text is not accepted',

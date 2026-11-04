@@ -30,6 +30,7 @@ import {
   resolveDisplayName,
 } from './db.js';
 import { describeMatch, resolveTarget, type ResolvedTarget } from './resolve.js';
+import { webpInfo } from './webp.js';
 import { getSocket, getConnectionStatus, isConnected, logoutSession, waitForConnection } from './connection.js';
 import { deserializeRawMessage, equivalentJids, getOwnJid, waMessageToStored } from './converters.js';
 import { contactsVcf } from './vcard.js';
@@ -393,11 +394,19 @@ async function cmdSendFile(req: IpcRequest, params?: Record<string, unknown>): P
   const messageId = requestMessageId(params);
   const resolved = await resolveSendTarget(target);
   const buf = await fs.promises.readFile(filePath);
+  let content: Record<string, unknown>;
+  if (params?.sticker === true) {
+    const webp = webpInfo(buf);
+    if (!webp) return { id: req.id, error: `Not a WebP image: ${filePath}` };
+    content = { sticker: buf, isAnimated: webp.animated, width: webp.width, height: webp.height };
+  } else {
+    content = buildFilePayload(filePath, buf, caption);
+  }
   return performSend(req, {
     messageId,
     resolved,
     kind: 'file',
-    content: buildFilePayload(filePath, buf, caption) as unknown as AnyMessageContent,
+    content: content as unknown as AnyMessageContent,
   });
 }
 

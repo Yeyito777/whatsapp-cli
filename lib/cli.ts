@@ -299,7 +299,7 @@ function outcomeUnknown(messageId: string, target: string, reason: string): neve
   process.exit(EXIT_OUTCOME_UNKNOWN);
 }
 
-function reportSend(result: SendResult, kind: 'message' | 'file', target: string): void {
+function reportSend(result: SendResult, kind: 'message' | 'file' | 'sticker', target: string): void {
   if (jsonMode) {
     console.log(formatJson(result));
   } else {
@@ -323,9 +323,11 @@ async function cmdSend(args: string[]): Promise<void> {
     'usage:',
     '  whatsapp send <target> [--reply <message_id>] [--id <message_id>]',
     '  whatsapp send <target> --file <path> [--id <message_id>]',
+    '  whatsapp send <target> --sticker <file.webp> [--id <message_id>]',
     '',
     'Message text is required as exact UTF-8 on stdin.',
     'With --file, stdin is the optional exact caption; empty stdin sends no caption.',
+    'With --sticker (512x512 .webp, animated or still), stdin must be empty: stickers have no caption.',
     'Inline text and --caption are not accepted.',
     '',
     'Every send gets a message ID before it leaves the CLI. If the outcome is',
@@ -344,6 +346,9 @@ async function cmdSend(args: string[]): Promise<void> {
 
   if (structure.file) {
     const caption = decodeExactUtf8(stdin, 'file caption', { required: false });
+    if (structure.sticker && caption !== undefined) {
+      throw new PayloadUsageError('stickers have no caption; send --sticker with empty stdin');
+    }
     requireDaemon();
     let result: SendResult;
     try {
@@ -351,13 +356,14 @@ async function cmdSend(args: string[]): Promise<void> {
         target: structure.target,
         file: path.resolve(structure.file),
         message_id: messageId,
+        ...(structure.sticker ? { sticker: true } : {}),
         ...(caption !== undefined ? { caption } : {}),
       }, FILE_SEND_TIMEOUT_MS) as SendResult;
     } catch (err) {
       if (err instanceof IpcOutcomeUnknownError) outcomeUnknown(messageId, structure.target, err.message);
       throw err;
     }
-    reportSend(result, 'file', structure.target);
+    reportSend(result, structure.sticker ? 'sticker' : 'file', structure.target);
     return;
   }
 

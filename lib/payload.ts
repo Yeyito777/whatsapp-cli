@@ -3,6 +3,8 @@ export class PayloadUsageError extends Error {}
 export interface SendStructure {
   target: string;
   file?: string;
+  /** Send the file as a WhatsApp sticker (a .webp, animated or still). */
+  sticker?: boolean;
   replyTo?: string;
   messageId?: string;
 }
@@ -14,16 +16,18 @@ export function parseSendStructure(args: string[]): SendStructure {
   }
 
   let file: string | undefined;
+  let sticker = false;
   let replyTo: string | undefined;
   let messageId: string | undefined;
   const inlinePayload: string[] = [];
 
   for (let index = 1; index < args.length; index++) {
     const arg = args[index];
-    if (arg === '--file') {
-      if (file !== undefined) throw new PayloadUsageError('--file may only be specified once');
+    if (arg === '--file' || arg === '--sticker') {
+      if (file !== undefined) throw new PayloadUsageError('only one of --file or --sticker, once');
       file = args[++index];
-      if (!file) throw new PayloadUsageError('missing file path after --file');
+      if (!file) throw new PayloadUsageError(`missing file path after ${arg}`);
+      sticker = arg === '--sticker';
       continue;
     }
     if (arg === '--reply') {
@@ -52,12 +56,16 @@ export function parseSendStructure(args: string[]): SendStructure {
     throw new PayloadUsageError(`${label} must be provided via stdin; inline text is not accepted`);
   }
   if (file && replyTo) {
-    throw new PayloadUsageError('--reply is not supported with --file');
+    throw new PayloadUsageError(`--reply is not supported with ${sticker ? '--sticker' : '--file'}`);
+  }
+  if (sticker && !file!.toLowerCase().endsWith('.webp')) {
+    throw new PayloadUsageError('--sticker needs a .webp file');
   }
 
   return {
     target,
     ...(file ? { file } : {}),
+    ...(sticker ? { sticker } : {}),
     ...(replyTo ? { replyTo } : {}),
     ...(messageId ? { messageId } : {}),
   };

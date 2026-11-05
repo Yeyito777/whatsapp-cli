@@ -456,12 +456,17 @@ export async function connectWhatsApp(logger: Logger): Promise<void> {
 
         if (reason === DisconnectReason.connectionReplaced) conflictCount++;
         else failureCount++;
-        // A 405 after a network change (e.g. a reboot) comes from the stored edge
-        // routing hint: WhatsApp keeps refusing it until it's dropped.
-        if (reason === 405 && state.creds.routingInfo) {
-          delete state.creds.routingInfo;
-          queueCredentialSave(saveCreds, logger);
-          logger.warn({ reason }, 'Dropped stale edge routing info after 405');
+        // WhatsApp answers 405 to a session it won't accept as sent: after a
+        // network change (e.g. a reboot) that's the stored edge routing hint, and
+        // after a WhatsApp Web release it's our cached client version. Drop both
+        // so the next attempt routes afresh and fetches the current version.
+        if (reason === 405) {
+          cachedWebVersion = null;
+          if (state.creds.routingInfo) {
+            delete state.creds.routingInfo;
+            queueCredentialSave(saveCreds, logger);
+          }
+          logger.warn({ reason }, 'Dropped edge routing info and cached web version after 405');
         }
         const decision = decideOnClose(reason, { failures: failureCount, conflicts: conflictCount });
 
